@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh --version)",
+      "Bash(git --version)",
+      "PowerShell(gh --version)"
+    ]
+  }
+}
