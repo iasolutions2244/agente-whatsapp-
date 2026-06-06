@@ -1,7 +1,7 @@
 import os
 import logging
 import requests
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from anthropic import Anthropic
 from dotenv import load_dotenv
 
@@ -71,9 +71,9 @@ def webhook_verify():
     challenge = request.args.get("hub.challenge")
 
     if mode == "subscribe" and token == WHATSAPP_VERIFY_TOKEN:
-        return challenge, 200
+        return Response(challenge, status=200, mimetype="text/plain")
 
-    return "Verificación fallida", 403
+    return Response("Verificación fallida", status=403, mimetype="text/plain")
 
 
 @app.route("/webhook", methods=["POST"])
