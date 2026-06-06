@@ -70,6 +70,8 @@ def webhook_verify():
     token = request.args.get("hub.verify_token")
     challenge = request.args.get("hub.challenge")
 
+    logging.info("Webhook verify | mode=%r | token=%r | expected=%r", mode, token, WHATSAPP_VERIFY_TOKEN)
+
     if mode == "subscribe" and token == WHATSAPP_VERIFY_TOKEN:
         return Response(challenge, status=200, mimetype="text/plain")
 
@@ -128,4 +130,4 @@ def reset():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, debug=False)
