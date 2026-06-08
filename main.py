@@ -22,11 +22,6 @@ for _var in _REQUIRED_VARS:
     logging.info("ENV CHECK | %s = %s", _var, "SET" if os.environ.get(_var) else "*** MISSING ***")
 
 app = Flask(__name__)
-client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-
-WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN")
-WHATSAPP_PHONE_ID = os.environ.get("WHATSAPP_PHONE_ID")
-WHATSAPP_API_URL = f"https://graph.facebook.com/v19.0/{WHATSAPP_PHONE_ID}/messages"
 
 SYSTEM_PROMPT = """Eres un asistente útil conectado a WhatsApp.
 Responde de forma clara y concisa.
@@ -37,6 +32,7 @@ conversation_histories: dict[str, list[dict]] = {}
 
 
 def ask_claude(user_message: str, phone_number: str) -> str:
+    client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
     history = conversation_histories.setdefault(phone_number, [])
     history.append({"role": "user", "content": user_message})
 
@@ -54,6 +50,9 @@ def ask_claude(user_message: str, phone_number: str) -> str:
 
 
 def send_whatsapp_message(to: str, body: str) -> None:
+    token = os.environ.get("WHATSAPP_TOKEN")
+    phone_id = os.environ.get("WHATSAPP_PHONE_ID")
+    api_url = f"https://graph.facebook.com/v19.0/{phone_id}/messages"
     payload = {
         "messaging_product": "whatsapp",
         "to": to,
@@ -61,12 +60,12 @@ def send_whatsapp_message(to: str, body: str) -> None:
         "text": {"body": body},
     }
     headers = {
-        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
-    logging.info("Enviando mensaje a %s | URL: %s", to, WHATSAPP_API_URL)
+    logging.info("Enviando mensaje a %s | URL: %s", to, api_url)
     try:
-        resp = requests.post(WHATSAPP_API_URL, json=payload, headers=headers, timeout=10)
+        resp = requests.post(api_url, json=payload, headers=headers, timeout=10)
         logging.info("Respuesta Meta API | status=%s | body=%s", resp.status_code, resp.text)
     except requests.exceptions.RequestException as e:
         logging.error("Error al llamar Meta API: %s", e)
