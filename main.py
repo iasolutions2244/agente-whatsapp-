@@ -12,12 +12,20 @@ logging.basicConfig(
 
 load_dotenv()
 
-app = Flask(__name__)
-client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+_REQUIRED_VARS = [
+    "ANTHROPIC_API_KEY",
+    "WHATSAPP_TOKEN",
+    "WHATSAPP_PHONE_ID",
+    "WHATSAPP_VERIFY_TOKEN",
+]
+for _var in _REQUIRED_VARS:
+    logging.info("ENV CHECK | %s = %s", _var, "SET" if os.environ.get(_var) else "*** MISSING ***")
 
-WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
-WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID")
-WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN")
+app = Flask(__name__)
+client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN")
+WHATSAPP_PHONE_ID = os.environ.get("WHATSAPP_PHONE_ID")
 WHATSAPP_API_URL = f"https://graph.facebook.com/v19.0/{WHATSAPP_PHONE_ID}/messages"
 
 SYSTEM_PROMPT = """Eres un asistente útil conectado a WhatsApp.
@@ -70,9 +78,10 @@ def webhook_verify():
     token = request.args.get("hub.verify_token")
     challenge = request.args.get("hub.challenge")
 
-    logging.info("Webhook verify | mode=%r | token=%r | expected=%r", mode, token, WHATSAPP_VERIFY_TOKEN)
+    verify_token = os.environ.get("WHATSAPP_VERIFY_TOKEN")
+    logging.info("Webhook verify | mode=%r | token=%r | expected=%r", mode, token, verify_token)
 
-    if mode == "subscribe" and token == WHATSAPP_VERIFY_TOKEN:
+    if mode == "subscribe" and token == verify_token:
         return Response(challenge, status=200, mimetype="text/plain")
 
     return Response("Verificación fallida", status=403, mimetype="text/plain")
