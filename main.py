@@ -30,6 +30,7 @@ app = Flask(__name__)
 # ──────────────────────────────────────────────────────────────
 
 FUDO_BASE_URL = os.environ.get("FUDO_BASE_URL", "https://app-v2.fu.do")
+FUDO_AUTH_URL = "https://auth.fu.do/api"
 
 
 class FudoClient:
@@ -44,7 +45,7 @@ class FudoClient:
 
     def _refresh_token(self) -> None:
         resp = requests.post(
-            f"{FUDO_BASE_URL}/auth/token",
+            FUDO_AUTH_URL,
             json={"api_key": self.api_key, "api_secret": self.api_secret},
             timeout=15,
         )
