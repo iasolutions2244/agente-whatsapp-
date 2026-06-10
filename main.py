@@ -29,7 +29,7 @@ app = Flask(__name__)
 # Fudo API Client
 # ──────────────────────────────────────────────────────────────
 
-FUDO_BASE_URL = os.environ.get("FUDO_BASE_URL", "https://app.fudo.com.ar/api/v1")
+FUDO_BASE_URL = os.environ.get("FUDO_BASE_URL", "https://app-v2.fu.do")
 
 
 class FudoClient:
