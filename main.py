@@ -46,7 +46,7 @@ class FudoClient:
     def _refresh_token(self) -> None:
         resp = requests.post(
             FUDO_AUTH_URL,
-            json={"api_key": self.api_key, "api_secret": self.api_secret},
+            json={"apiKey": self.api_key, "apiSecret": self.api_secret},
             timeout=15,
         )
         resp.raise_for_status()
