@@ -171,12 +171,16 @@ def get_products(name: str | None = None, active: bool = True, stock_control: bo
 
 
 def get_ingredients(name: str | None = None, stock_control: bool | None = None) -> dict:
-    query = "page[size]=100&sort=name&include=ingredientCategory,unit"
-    if name:
-        query += f"&filter[name]={name}"
+    query = "page[size]=100&sort=name&include=ingredientCategory,unit&fields[ingredient]=cost,minStock,name,shrinkage,stock,stockControl"
     if stock_control:
         query += "&filter[stockControl]=eq.true"
+    if name:
+        query += f"&filter[name]={name}"
     return _fudo_get("/ingredients", query)
+
+
+def get_stock_status() -> dict:
+    return _fudo_get("/ingredients", "filter[stockControl]=eq.true&page[size]=100&sort=name&fields[ingredient]=cost,minStock,name,shrinkage,stock,stockControl&include=unit")
 
 
 def get_expenses(from_date: str, to_date: str, category_id: str | None = None) -> dict:
@@ -233,6 +237,7 @@ _TOOL_FUNCTIONS: dict[str, Any] = {
     "get_categories_sales": get_categories_sales,
     "get_products": get_products,
     "get_ingredients": get_ingredients,
+    "get_stock_status": get_stock_status,
     "get_expenses": get_expenses,
     "get_expense_categories": get_expense_categories,
     "get_payments": get_payments,
@@ -369,6 +374,15 @@ FUDO_TOOLS = [
         },
     },
     {
+        "name": "get_stock_status",
+        "description": "Obtiene el estado actual del stock de todos los ingredientes con control de inventario. Muestra stock actual, stock mínimo y shrinkage (merma) de cada insumo.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
         "name": "get_expenses",
         "description": (
             "Obtiene los gastos/egresos registrados en un rango de fechas. "
@@ -481,6 +495,9 @@ VENTAS Y PEDIDOS:
 PRODUCTOS E INVENTARIO:
 - "¿Qué productos tenemos?" / "¿Está activo el producto X?" → get_products
 - "¿Cuánto stock tiene el ingrediente X?" / "¿Qué hay en inventario?" → get_ingredients (usa stock_control=true si preguntan solo los que tienen control de stock)
+- "¿Cuánto stock queda de X?" → get_stock_status o get_ingredients con name
+- "¿Hay ingredientes bajo el mínimo?" → get_stock_status (compara stock vs minStock)
+- "¿Cuánta merma hay?" → get_stock_status (campo shrinkage de cada ingrediente)
 - "¿Cuáles son las categorías del menú?" → get_product_categories
 
 GASTOS Y EGRESOS:
