@@ -183,6 +183,13 @@ def get_stock_status() -> dict:
     return _fudo_get("/ingredients", "filter[stockControl]=eq.true&page[size]=100&sort=name&fields[ingredient]=cost,minStock,name,shrinkage,stock,stockControl&include=unit")
 
 
+def get_last_stock_count() -> dict:
+    return _fudo_get(
+        "/products",
+        "filter[stockControl]=eq.true&page[size]=100&sort=name&fields[product]=name,stock,minStock,lastStockCountAt,stockControl"
+    )
+
+
 def get_expenses(from_date: str, to_date: str, category_id: str | None = None) -> dict:
     query = (
         f"filter[createdAt]=and(gte.{from_date}T00:00:00Z,lte.{to_date}T23:59:59Z)"
@@ -238,6 +245,7 @@ _TOOL_FUNCTIONS: dict[str, Any] = {
     "get_products": get_products,
     "get_ingredients": get_ingredients,
     "get_stock_status": get_stock_status,
+    "get_last_stock_count": get_last_stock_count,
     "get_expenses": get_expenses,
     "get_expense_categories": get_expense_categories,
     "get_payments": get_payments,
@@ -383,6 +391,15 @@ FUDO_TOOLS = [
         },
     },
     {
+        "name": "get_last_stock_count",
+        "description": "Obtiene los productos con control de stock y la fecha de su último conteo de inventario (lastStockCountAt). Usar cuando pregunten cuándo fue el último inventario, último conteo, o quieren ver el historial de conteos.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
         "name": "get_expenses",
         "description": (
             "Obtiene los gastos/egresos registrados en un rango de fechas. "
@@ -498,7 +515,8 @@ PRODUCTOS E INVENTARIO:
 - "¿Cuánto stock queda de X?" → get_stock_status o get_ingredients con name. El stock es numérico sin unidad especificada en Fudo.
 - "¿Qué ingredientes tienen merma?" → get_stock_status, mostrar los que tienen shrinkage > 0
 - "¿Hay ingredientes sin stock?" → get_stock_status, mostrar los que tienen stock = null o stock = 0
-- "¿Cuándo fue el último inventario?" → Fudo no registra esa fecha, informar al dueño que debe configurar minStock y fechas en el sistema Fudo directamente.
+- "¿Cuándo fue el último inventario?" → get_last_stock_count, buscar el lastStockCountAt más reciente entre todos los productos y mostrarlo como fecha legible
+- "¿Cuándo se hizo el último conteo de stock?" → get_last_stock_count
 - "¿Hay diferencias significativas en stock?" → Comparar stock actual vs minStock. Si minStock es null en todos, avisar que no hay mínimos configurados en Fudo y sugerir configurarlos.
 - "¿Cuáles son las categorías del menú?" → get_product_categories
 
