@@ -64,14 +64,16 @@ class FudoClient:
                 self._refresh_token()
             return self._token  # type: ignore[return-value]
 
-    def get(self, endpoint: str, params: dict | None = None) -> Any:
+    def get(self, endpoint: str, raw_query: str | None = None) -> Any:
         """GET autenticado con reintento automático ante token expirado."""
+        url = f"{FUDO_BASE_URL}{endpoint}"
+        if raw_query:
+            url = f"{url}?{raw_query}"
         for attempt in range(2):
             token = self._get_token()
             resp = requests.get(
-                f"{FUDO_BASE_URL}{endpoint}",
+                url,
                 headers={"Authorization": f"Bearer {token}"},
-                params=params,
                 timeout=20,
             )
             if resp.status_code == 401 and attempt == 0:
@@ -86,12 +88,12 @@ class FudoClient:
 _fudo_client = FudoClient()
 
 
-def _fudo_get(endpoint: str, params: dict | None = None) -> dict:
+def _fudo_get(endpoint: str, raw_query: str | None = None) -> dict:
     """Llama a Fudo y retorna un dict de error en vez de lanzar excepción."""
     if not _FUDO_ENABLED:
         return {"error": "Fudo no configurado. Agrega FUDO_API_KEY y FUDO_API_SECRET al .env"}
     try:
-        return _fudo_client.get(endpoint, params)
+        return _fudo_client.get(endpoint, raw_query)
     except Exception as exc:
         logging.error("Fudo API error | endpoint=%s | %s", endpoint, exc)
         return {"error": str(exc)}
@@ -106,29 +108,26 @@ def _date_filter(from_date: str, to_date: str) -> str:
 
 
 def get_sales_report(from_date: str, to_date: str) -> dict:
-    return _fudo_get("/sales", {"filter[createdAt]": _date_filter(from_date, to_date)})
+    return _fudo_get("/sales", f"filter[createdAt]={_date_filter(from_date, to_date)}")
 
 
 def get_top_products(from_date: str, to_date: str, limit: int = 10) -> dict:
-    return _fudo_get("/products", {
-        "filter[createdAt]": _date_filter(from_date, to_date),
-        "page[size]": limit,
-    })
+    return _fudo_get("/products", f"filter[createdAt]={_date_filter(from_date, to_date)}&page[size]={limit}")
 
 
 def get_waste_report(from_date: str, to_date: str) -> dict:
-    return _fudo_get("/waste", {"filter[createdAt]": _date_filter(from_date, to_date)})
+    return _fudo_get("/waste", f"filter[createdAt]={_date_filter(from_date, to_date)}")
 
 
 def get_deliveries_report(from_date: str, to_date: str) -> dict:
-    return _fudo_get("/deliveries", {"filter[createdAt]": _date_filter(from_date, to_date)})
+    return _fudo_get("/deliveries", f"filter[createdAt]={_date_filter(from_date, to_date)}")
 
 
 def get_orders(from_date: str, to_date: str, status: str = "all") -> dict:
-    params: dict = {"filter[createdAt]": _date_filter(from_date, to_date)}
+    query = f"filter[createdAt]={_date_filter(from_date, to_date)}"
     if status != "all":
-        params["filter[saleState]"] = status
-    return _fudo_get("/orders", params)
+        query += f"&filter[saleState]={status}"
+    return _fudo_get("/orders", query)
 
 
 def compare_periods(
@@ -159,7 +158,7 @@ def compare_periods(
 
 
 def get_categories_sales(from_date: str, to_date: str) -> dict:
-    return _fudo_get("/categories", {"filter[createdAt]": _date_filter(from_date, to_date)})
+    return _fudo_get("/categories", f"filter[createdAt]={_date_filter(from_date, to_date)}")
 
 
 _TOOL_FUNCTIONS: dict[str, Any] = {
