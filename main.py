@@ -112,22 +112,22 @@ def get_sales_report(from_date: str, to_date: str) -> dict:
 
 
 def get_top_products(from_date: str, to_date: str, limit: int = 10) -> dict:
-    return _fudo_get("/products", f"filter[createdAt]={_date_filter(from_date, to_date)}&page[size]={limit}")
+    return _fudo_get("/sales", f"filter[createdAt]={_date_filter(from_date, to_date)}&page[size]=100&include=items.product&sort=-createdAt")
 
 
-def get_waste_report(from_date: str, to_date: str) -> dict:
-    return _fudo_get("/waste", f"filter[createdAt]={_date_filter(from_date, to_date)}")
+def get_waste_report() -> dict:
+    return _fudo_get("/ingredients", "page[size]=100&sort=name&include=ingredientCategory,unit&filter[stockControl]=true")
 
 
 def get_deliveries_report(from_date: str, to_date: str) -> dict:
-    return _fudo_get("/deliveries", f"filter[createdAt]={_date_filter(from_date, to_date)}")
+    return _fudo_get("/sales", f"filter[createdAt]={_date_filter(from_date, to_date)}&filter[saleType]=DELIVERY&page[size]=100&include=items")
 
 
 def get_orders(from_date: str, to_date: str, status: str = "all") -> dict:
-    query = f"filter[createdAt]={_date_filter(from_date, to_date)}"
+    query = f"filter[createdAt]={_date_filter(from_date, to_date)}&page[size]=100&include=items.product,payments.paymentMethod"
     if status != "all":
         query += f"&filter[saleState]=in.({status})"
-    return _fudo_get("/orders", query)
+    return _fudo_get("/sales", query)
 
 
 def compare_periods(
@@ -157,8 +157,8 @@ def compare_periods(
         return {"periodo_base": p1, "periodo_comparado": p2}
 
 
-def get_categories_sales(from_date: str, to_date: str) -> dict:
-    return _fudo_get("/categories", f"filter[createdAt]={_date_filter(from_date, to_date)}")
+def get_categories_sales() -> dict:
+    return _fudo_get("/product-categories", "page[size]=100&sort=name&include=products")
 
 
 def get_products(name: str | None = None, active: bool = True, stock_control: bool | None = None) -> dict:
@@ -277,14 +277,11 @@ FUDO_TOOLS = [
     },
     {
         "name": "get_waste_report",
-        "description": "Obtiene el reporte de mermas y desperdicios registrados en Fudo.",
+        "description": "Obtiene los ingredientes/insumos con control de stock para ver niveles de inventario y merma. No requiere fechas.",
         "input_schema": {
             "type": "object",
-            "properties": {
-                "from_date": {"type": "string", "description": "Fecha de inicio YYYY-MM-DD"},
-                "to_date": {"type": "string", "description": "Fecha de fin YYYY-MM-DD"},
-            },
-            "required": ["from_date", "to_date"],
+            "properties": {},
+            "required": [],
         },
     },
     {
@@ -334,14 +331,11 @@ FUDO_TOOLS = [
     },
     {
         "name": "get_categories_sales",
-        "description": "Obtiene ventas desglosadas por categoría de producto.",
+        "description": "Obtiene las categorías del menú con los productos que contiene cada una. No requiere fechas.",
         "input_schema": {
             "type": "object",
-            "properties": {
-                "from_date": {"type": "string", "description": "Fecha de inicio YYYY-MM-DD"},
-                "to_date": {"type": "string", "description": "Fecha de fin YYYY-MM-DD"},
-            },
-            "required": ["from_date", "to_date"],
+            "properties": {},
+            "required": [],
         },
     },
     {
