@@ -161,6 +161,68 @@ def get_categories_sales(from_date: str, to_date: str) -> dict:
     return _fudo_get("/categories", f"filter[createdAt]={_date_filter(from_date, to_date)}")
 
 
+def get_products(name: str | None = None, active: bool = True, stock_control: bool | None = None) -> dict:
+    query = "filter[active]=true&page[size]=100&sort=name&include=productCategory"
+    if name:
+        query += f"&filter[name]={name}"
+    if stock_control:
+        query += "&filter[stockControl]=true"
+    return _fudo_get("/products", query)
+
+
+def get_ingredients(name: str | None = None, stock_control: bool | None = None) -> dict:
+    query = "page[size]=100&sort=name&include=ingredientCategory,unit"
+    if name:
+        query += f"&filter[name]={name}"
+    if stock_control:
+        query += "&filter[stockControl]=true"
+    return _fudo_get("/ingredients", query)
+
+
+def get_expenses(from_date: str, to_date: str, category_id: str | None = None) -> dict:
+    query = (
+        f"filter[createdAt]=and(gte.{from_date}T00:00:00Z,lte.{to_date}T23:59:59Z)"
+        "&page[size]=100&sort=-date&include=expenseCategory,provider,payments.paymentMethod"
+    )
+    if category_id:
+        query += f"&filter[expenseCategoryId]={category_id}"
+    return _fudo_get("/expenses", query)
+
+
+def get_expense_categories() -> dict:
+    return _fudo_get("/expense-categories", "page[size]=100&sort=name")
+
+
+def get_payments(from_date: str, to_date: str, canceled: bool = False) -> dict:
+    query = (
+        f"filter[createdAt]=and(gte.{from_date}T00:00:00Z,lte.{to_date}T23:59:59Z)"
+        "&filter[canceled]=false&page[size]=100&sort=-id&include=paymentMethod"
+    )
+    return _fudo_get("/payments", query)
+
+
+def get_payment_methods() -> dict:
+    return _fudo_get("/payment-methods", "page[size]=50")
+
+
+def get_customers(name: str | None = None, active: bool = True) -> dict:
+    query = "filter[active]=true&page[size]=100&sort=name"
+    if name:
+        query += f"&filter[@all]={name}"
+    return _fudo_get("/customers", query)
+
+
+def get_tables(include_active_sales: bool = False) -> dict:
+    query = "page[size]=100&sort=number"
+    if include_active_sales:
+        query += "&include=activeSales,room"
+    return _fudo_get("/tables", query)
+
+
+def get_product_categories() -> dict:
+    return _fudo_get("/product-categories", "page[size]=100&sort=name&include=products")
+
+
 _TOOL_FUNCTIONS: dict[str, Any] = {
     "get_sales_report": get_sales_report,
     "get_top_products": get_top_products,
@@ -169,6 +231,15 @@ _TOOL_FUNCTIONS: dict[str, Any] = {
     "get_orders": get_orders,
     "compare_periods": compare_periods,
     "get_categories_sales": get_categories_sales,
+    "get_products": get_products,
+    "get_ingredients": get_ingredients,
+    "get_expenses": get_expenses,
+    "get_expense_categories": get_expense_categories,
+    "get_payments": get_payments,
+    "get_payment_methods": get_payment_methods,
+    "get_customers": get_customers,
+    "get_tables": get_tables,
+    "get_product_categories": get_product_categories,
 }
 
 # ──────────────────────────────────────────────────────────────
@@ -273,6 +344,125 @@ FUDO_TOOLS = [
             "required": ["from_date", "to_date"],
         },
     },
+    {
+        "name": "get_products",
+        "description": (
+            "Obtiene el listado de productos activos del menú con sus categorías. "
+            "Usa name para buscar un producto específico. Usa stock_control=true para filtrar los que llevan control de stock."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Nombre o parte del nombre del producto a buscar"},
+                "stock_control": {"type": "boolean", "description": "Si true, solo devuelve productos con control de stock"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "get_ingredients",
+        "description": (
+            "Obtiene ingredientes/insumos con su stock actual, unidad y categoría. "
+            "Sirve para consultar inventario y merma. Usa name para buscar un insumo específico."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Nombre o parte del nombre del ingrediente"},
+                "stock_control": {"type": "boolean", "description": "Si true, solo devuelve ingredientes con control de stock"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "get_expenses",
+        "description": (
+            "Obtiene los gastos/egresos registrados en un rango de fechas. "
+            "Incluye categoría, proveedor y método de pago. Usa category_id para filtrar por categoría."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "from_date": {"type": "string", "description": "Fecha de inicio YYYY-MM-DD"},
+                "to_date": {"type": "string", "description": "Fecha de fin YYYY-MM-DD"},
+                "category_id": {"type": "string", "description": "ID de categoría de gasto para filtrar (opcional)"},
+            },
+            "required": ["from_date", "to_date"],
+        },
+    },
+    {
+        "name": "get_expense_categories",
+        "description": "Obtiene todas las categorías de gastos/egresos disponibles en Fudo.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "get_payments",
+        "description": (
+            "Obtiene los pagos recibidos en un rango de fechas con el método de pago de cada uno. "
+            "Útil para ver totales por efectivo, tarjeta, transferencia, etc."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "from_date": {"type": "string", "description": "Fecha de inicio YYYY-MM-DD"},
+                "to_date": {"type": "string", "description": "Fecha de fin YYYY-MM-DD"},
+            },
+            "required": ["from_date", "to_date"],
+        },
+    },
+    {
+        "name": "get_payment_methods",
+        "description": "Obtiene todos los métodos de pago configurados en Fudo (efectivo, tarjeta, QR, etc.).",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "get_customers",
+        "description": (
+            "Obtiene el listado de clientes activos. "
+            "Usa name para buscar un cliente por nombre, teléfono o email."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Nombre, teléfono o email del cliente a buscar"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "get_tables",
+        "description": (
+            "Obtiene el estado de las mesas. "
+            "Usa include_active_sales=true para ver cuáles tienen ventas activas en este momento."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "include_active_sales": {
+                    "type": "boolean",
+                    "description": "Si true, incluye las ventas activas en cada mesa (para ver qué mesas están ocupadas)",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "get_product_categories",
+        "description": "Obtiene todas las categorías de productos del menú con los productos que contiene cada una.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
 ]
 
 # ──────────────────────────────────────────────────────────────
@@ -286,12 +476,35 @@ La fecha de hoy es {today}.
 Cuando el dueño pregunta sobre su negocio, usas las herramientas de Fudo para consultar datos reales y responder con información precisa.
 Nunca inventas datos: si no tienes la información o la API falla, lo dices claramente.
 
-Puedes responder preguntas como:
-- ¿Cuánto vendimos hoy / esta semana / este mes?
-- ¿Cuáles son los productos más vendidos?
-- ¿Cómo estuvo el delivery?
-- ¿Cuánto hay de merma?
-- Comparame las ventas de esta semana con la anterior
+VENTAS Y PEDIDOS:
+- "¿Cuánto vendimos hoy / esta semana / este mes?" → get_sales_report
+- "¿Cuáles son los productos más vendidos?" → get_top_products
+- "¿Cómo estuvo el delivery?" → get_deliveries_report
+- "¿Cuánto hay de merma?" → get_waste_report
+- "Comparame las ventas de esta semana con la anterior" → compare_periods
+- "Ventas por categoría" → get_categories_sales
+
+PRODUCTOS E INVENTARIO:
+- "¿Qué productos tenemos?" / "¿Está activo el producto X?" → get_products
+- "¿Cuánto stock tiene el ingrediente X?" / "¿Qué hay en inventario?" → get_ingredients (usa stock_control=true si preguntan solo los que tienen control de stock)
+- "¿Cuáles son las categorías del menú?" → get_product_categories
+
+GASTOS Y EGRESOS:
+- "¿Cuáles son los gastos de hoy / esta semana?" → get_expenses con from_date y to_date
+- "¿Cuáles son las categorías de gastos?" → get_expense_categories
+- Para filtrar por categoría, primero llama get_expense_categories para obtener el ID
+
+PAGOS:
+- "¿Cuánto se cobró hoy en efectivo / tarjeta?" → get_payments para obtener los pagos, luego agrupa por método
+- "¿Cuáles son los métodos de pago?" → get_payment_methods
+
+CLIENTES:
+- "¿Cuántos clientes tenemos?" / "Busca el cliente X" → get_customers
+- Para buscar por nombre, teléfono o email usa el parámetro name
+
+MESAS:
+- "¿Qué mesas están ocupadas ahora?" → get_tables con include_active_sales=true
+- "¿Cuántas mesas hay?" → get_tables
 
 Responde de forma clara y directa. Cuando muestres montos usa el formato local (ej: $12.500).
 Para preguntas que no son del negocio, responde normalmente."""
