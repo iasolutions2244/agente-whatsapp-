@@ -104,7 +104,7 @@ def _fudo_get(endpoint: str, raw_query: str | None = None) -> dict:
 # ──────────────────────────────────────────────────────────────
 
 def _date_filter(from_date: str, to_date: str) -> str:
-    return f"gte:{from_date}|and|lte:{to_date}"
+    return f"and(gte.{from_date}T00:00:00Z,lte.{to_date}T23:59:59Z)"
 
 
 def get_sales_report(from_date: str, to_date: str) -> dict:
@@ -126,7 +126,7 @@ def get_deliveries_report(from_date: str, to_date: str) -> dict:
 def get_orders(from_date: str, to_date: str, status: str = "all") -> dict:
     query = f"filter[createdAt]={_date_filter(from_date, to_date)}"
     if status != "all":
-        query += f"&filter[saleState]={status}"
+        query += f"&filter[saleState]=in.({status})"
     return _fudo_get("/orders", query)
 
 
