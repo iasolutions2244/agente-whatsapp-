@@ -116,7 +116,7 @@ def get_top_products(from_date: str, to_date: str, limit: int = 10) -> dict:
 
 
 def get_waste_report() -> dict:
-    return _fudo_get("/ingredients", "page[size]=100&sort=name&include=ingredientCategory,unit&filter[stockControl]=true")
+    return _fudo_get("/ingredients", "page[size]=100&sort=name&include=ingredientCategory,unit&filter[stockControl]=eq.true")
 
 
 def get_deliveries_report(from_date: str, to_date: str) -> dict:
@@ -162,11 +162,11 @@ def get_categories_sales() -> dict:
 
 
 def get_products(name: str | None = None, active: bool = True, stock_control: bool | None = None) -> dict:
-    query = "filter[active]=true&page[size]=100&sort=name&include=productCategory"
+    query = "filter[active]=eq.true&page[size]=100&sort=name&include=productCategory"
     if name:
         query += f"&filter[name]={name}"
     if stock_control:
-        query += "&filter[stockControl]=true"
+        query += "&filter[stockControl]=eq.true"
     return _fudo_get("/products", query)
 
 
@@ -175,7 +175,7 @@ def get_ingredients(name: str | None = None, stock_control: bool | None = None) 
     if name:
         query += f"&filter[name]={name}"
     if stock_control:
-        query += "&filter[stockControl]=true"
+        query += "&filter[stockControl]=eq.true"
     return _fudo_get("/ingredients", query)
 
 
@@ -206,7 +206,7 @@ def get_payment_methods() -> dict:
 
 
 def get_customers(name: str | None = None, active: bool = True) -> dict:
-    query = "filter[active]=true&page[size]=100&sort=name"
+    query = "filter[active]=eq.true&page[size]=100&sort=name"
     if name:
         query += f"&filter[@all]={name}"
     return _fudo_get("/customers", query)
