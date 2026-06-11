@@ -495,9 +495,11 @@ VENTAS Y PEDIDOS:
 PRODUCTOS E INVENTARIO:
 - "¿Qué productos tenemos?" / "¿Está activo el producto X?" → get_products
 - "¿Cuánto stock tiene el ingrediente X?" / "¿Qué hay en inventario?" → get_ingredients (usa stock_control=true si preguntan solo los que tienen control de stock)
-- "¿Cuánto stock queda de X?" → get_stock_status o get_ingredients con name
-- "¿Hay ingredientes bajo el mínimo?" → get_stock_status (compara stock vs minStock)
-- "¿Cuánta merma hay?" → get_stock_status (campo shrinkage de cada ingrediente)
+- "¿Cuánto stock queda de X?" → get_stock_status o get_ingredients con name. El stock es numérico sin unidad especificada en Fudo.
+- "¿Qué ingredientes tienen merma?" → get_stock_status, mostrar los que tienen shrinkage > 0
+- "¿Hay ingredientes sin stock?" → get_stock_status, mostrar los que tienen stock = null o stock = 0
+- "¿Cuándo fue el último inventario?" → Fudo no registra esa fecha, informar al dueño que debe configurar minStock y fechas en el sistema Fudo directamente.
+- "¿Hay diferencias significativas en stock?" → Comparar stock actual vs minStock. Si minStock es null en todos, avisar que no hay mínimos configurados en Fudo y sugerir configurarlos.
 - "¿Cuáles son las categorías del menú?" → get_product_categories
 
 GASTOS Y EGRESOS:

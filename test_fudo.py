@@ -3,6 +3,7 @@ Prueba cada endpoint de Fudo y reporta cuáles funcionan.
 Uso: python test_fudo.py
 """
 
+import json
 import os
 import requests
 from dotenv import load_dotenv
@@ -18,7 +19,7 @@ DATE_FILTER = "and(gte.2026-06-09T00:00:00Z,lte.2026-06-11T23:59:59Z)"
 
 ENDPOINTS = [
     ("/sales",             f"filter[createdAt]={DATE_FILTER}&page[size]=5"),
-    ("/products",          "page[size]=5&filter[active]=true"),
+    ("/products",          "page[size]=5&filter[active]=eq.true"),
     ("/ingredients",       "page[size]=5"),
     ("/expenses",          f"filter[createdAt]={DATE_FILTER}&page[size]=5"),
     ("/expense-categories","page[size]=5"),
@@ -32,6 +33,11 @@ ENDPOINTS = [
     ("/rooms",             "page[size]=5"),
     ("/kitchens",          "page[size]=5"),
     ("/items",             "page[size]=5&sort=-createdAt"),
+]
+
+DETAIL_ENDPOINTS = [
+    ("/products (stock+lastCount)",   "/products",     "filter[stockControl]=eq.true&page[size]=5&fields[product]=name,stock,minStock,lastStockCountAt&sort=-lastStockCountAt"),
+    ("/ingredients (stock+shrinkage)", "/ingredients", "filter[stockControl]=eq.true&page[size]=5&fields[ingredient]=name,stock,minStock,shrinkage,stockControl"),
 ]
 
 
@@ -144,6 +150,28 @@ def main():
         print(f"\n❌ ERROR    ({len(error_list)}): {', '.join(error_list)}")
 
     print()
+
+    # ── Pruebas detalladas: imprime JSON completo para inspeccionar campos ──
+    print("=" * 60)
+    print("DETALLE DE CAMPOS — JSON COMPLETO")
+    print("=" * 60)
+    for label, endpoint, query in DETAIL_ENDPOINTS:
+        print(f"\n▶ {label}")
+        print(f"  Query: {query}")
+        url = f"{FUDO_BASE_URL}{endpoint}?{query}"
+        try:
+            resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=20)
+            try:
+                data = resp.json()
+            except Exception:
+                print(f"  HTTP {resp.status_code} — respuesta no es JSON: {resp.text[:200]}")
+                continue
+            if resp.status_code == 200:
+                print(json.dumps(data, indent=2, ensure_ascii=False))
+            else:
+                print(f"  HTTP {resp.status_code} — {data}")
+        except requests.exceptions.RequestException as exc:
+            print(f"  Error de conexión: {exc}")
 
 
 if __name__ == "__main__":
