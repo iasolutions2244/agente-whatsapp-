@@ -102,26 +102,26 @@ def _fudo_get(endpoint: str, params: dict | None = None) -> dict:
 # ──────────────────────────────────────────────────────────────
 
 def get_sales_report(from_date: str, to_date: str) -> dict:
-    return _fudo_get("/reports/sales", {"from": from_date, "to": to_date})
+    return _fudo_get("/api/v1alpha1/reports/sales", {"from": from_date, "to": to_date})
 
 
 def get_top_products(from_date: str, to_date: str, limit: int = 10) -> dict:
-    return _fudo_get("/reports/products", {"from": from_date, "to": to_date, "limit": limit})
+    return _fudo_get("/api/v1alpha1/reports/products", {"from": from_date, "to": to_date, "limit": limit})
 
 
 def get_waste_report(from_date: str, to_date: str) -> dict:
-    return _fudo_get("/reports/waste", {"from": from_date, "to": to_date})
+    return _fudo_get("/api/v1alpha1/reports/waste", {"from": from_date, "to": to_date})
 
 
 def get_deliveries_report(from_date: str, to_date: str) -> dict:
-    return _fudo_get("/reports/deliveries", {"from": from_date, "to": to_date})
+    return _fudo_get("/api/v1alpha1/reports/deliveries", {"from": from_date, "to": to_date})
 
 
 def get_orders(from_date: str, to_date: str, status: str = "all") -> dict:
     params: dict = {"from": from_date, "to": to_date}
     if status != "all":
         params["status"] = status
-    return _fudo_get("/orders", params)
+    return _fudo_get("/api/v1alpha1/orders", params)
 
 
 def compare_periods(
@@ -152,7 +152,7 @@ def compare_periods(
 
 
 def get_categories_sales(from_date: str, to_date: str) -> dict:
-    return _fudo_get("/reports/categories", {"from": from_date, "to": to_date})
+    return _fudo_get("/api/v1alpha1/reports/categories", {"from": from_date, "to": to_date})
 
 
 _TOOL_FUNCTIONS: dict[str, Any] = {
