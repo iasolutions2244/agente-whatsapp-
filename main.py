@@ -101,26 +101,33 @@ def _fudo_get(endpoint: str, params: dict | None = None) -> dict:
 # Funciones de consulta (solo lectura)
 # ──────────────────────────────────────────────────────────────
 
+def _date_filter(from_date: str, to_date: str) -> str:
+    return f"gte:{from_date}|and|lte:{to_date}"
+
+
 def get_sales_report(from_date: str, to_date: str) -> dict:
-    return _fudo_get("/sales", {"from": from_date, "to": to_date})
+    return _fudo_get("/sales", {"filter[createdAt]": _date_filter(from_date, to_date)})
 
 
 def get_top_products(from_date: str, to_date: str, limit: int = 10) -> dict:
-    return _fudo_get("/products", {"from": from_date, "to": to_date, "limit": limit})
+    return _fudo_get("/products", {
+        "filter[createdAt]": _date_filter(from_date, to_date),
+        "page[size]": limit,
+    })
 
 
 def get_waste_report(from_date: str, to_date: str) -> dict:
-    return _fudo_get("/waste", {"from": from_date, "to": to_date})
+    return _fudo_get("/waste", {"filter[createdAt]": _date_filter(from_date, to_date)})
 
 
 def get_deliveries_report(from_date: str, to_date: str) -> dict:
-    return _fudo_get("/deliveries", {"from": from_date, "to": to_date})
+    return _fudo_get("/deliveries", {"filter[createdAt]": _date_filter(from_date, to_date)})
 
 
 def get_orders(from_date: str, to_date: str, status: str = "all") -> dict:
-    params: dict = {"from": from_date, "to": to_date}
+    params: dict = {"filter[createdAt]": _date_filter(from_date, to_date)}
     if status != "all":
-        params["status"] = status
+        params["filter[saleState]"] = status
     return _fudo_get("/orders", params)
 
 
@@ -152,7 +159,7 @@ def compare_periods(
 
 
 def get_categories_sales(from_date: str, to_date: str) -> dict:
-    return _fudo_get("/categories", {"from": from_date, "to": to_date})
+    return _fudo_get("/categories", {"filter[createdAt]": _date_filter(from_date, to_date)})
 
 
 _TOOL_FUNCTIONS: dict[str, Any] = {
