@@ -9,6 +9,7 @@ import requests
 from anthropic import Anthropic
 from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, request
+from supabase import create_client, Client
 
 logging.basicConfig(
     level=logging.INFO,
@@ -17,13 +18,186 @@ logging.basicConfig(
 
 load_dotenv()
 
-for _var in ["ANTHROPIC_API_KEY", "WHATSAPP_TOKEN", "WHATSAPP_PHONE_ID", "WHATSAPP_VERIFY_TOKEN"]:
+for _var in ["ANTHROPIC_API_KEY", "WHATSAPP_TOKEN", "WHATSAPP_PHONE_ID", "WHATSAPP_VERIFY_TOKEN", "SUPABASE_URL", "SUPABASE_KEY"]:
     logging.info("ENV CHECK | %s = %s", _var, "SET" if os.environ.get(_var) else "*** MISSING ***")
 
 _FUDO_ENABLED = bool(os.environ.get("FUDO_API_KEY") and os.environ.get("FUDO_API_SECRET"))
 logging.info("FUDO | habilitado=%s", _FUDO_ENABLED)
 
 app = Flask(__name__)
+
+# ──────────────────────────────────────────────────────────────
+# Supabase Client
+# ──────────────────────────────────────────────────────────────
+
+_supabase: Client | None = None
+
+def get_supabase() -> Client | None:
+    global _supabase
+    if _supabase:
+        return _supabase
+    url = os.environ.get("SUPABASE_URL")
+    key = os.environ.get("SUPABASE_KEY")
+    if url and key:
+        _supabase = create_client(url, key)
+        logging.info("Supabase conectado")
+    else:
+        logging.warning("Supabase no configurado — usando memoria RAM")
+    return _supabase
+
+
+# ──────────────────────────────────────────────────────────────
+# Funciones de memoria (Supabase)
+# ──────────────────────────────────────────────────────────────
+
+def get_or_create_cliente(phone_number: str) -> str | None:
+    """Busca el cliente por número de WhatsApp. Si no existe, lo crea."""
+    sb = get_supabase()
+    if not sb:
+        return None
+    try:
+        result = sb.table("clientes").select("id").eq("whatsapp_number_user", phone_number).execute()
+        if result.data:
+            return result.data[0]["id"]
+        # Crear cliente nuevo automáticamente
+        nuevo = sb.table("clientes").insert({
+            "nombre_restaurante": f"Cliente {phone_number}",
+            "pais": "Chile",
+            "whatsapp_phone_id": os.environ.get("WHATSAPP_PHONE_ID", ""),
+            "whatsapp_number_user": phone_number,
+            "activo": True
+        }).execute()
+        if nuevo.data:
+            cliente_id = nuevo.data[0]["id"]
+            logging.info("Nuevo cliente creado | id=%s | phone=%s", cliente_id, phone_number)
+            return cliente_id
+    except Exception as exc:
+        logging.error("Error get_or_create_cliente | %s", exc)
+    return None
+
+
+def get_or_create_conversacion(cliente_id: str) -> str | None:
+    """Obtiene la conversación activa del cliente o crea una nueva."""
+    sb = get_supabase()
+    if not sb:
+        return None
+    try:
+        # Buscar conversación activa (sin fecha_fin, de las últimas 2 horas)
+        desde = (datetime.utcnow() - timedelta(hours=2)).isoformat()
+        result = sb.table("conversaciones") \
+            .select("id") \
+            .eq("cliente_id", cliente_id) \
+            .is_("fecha_fin", "null") \
+            .gte("fecha_inicio", desde) \
+            .order("fecha_inicio", desc=True) \
+            .limit(1) \
+            .execute()
+        if result.data:
+            return result.data[0]["id"]
+        # Crear nueva conversación
+        nueva = sb.table("conversaciones").insert({
+            "cliente_id": cliente_id,
+            "fecha_inicio": datetime.utcnow().isoformat(),
+            "pais": "Chile"
+        }).execute()
+        if nueva.data:
+            return nueva.data[0]["id"]
+    except Exception as exc:
+        logging.error("Error get_or_create_conversacion | %s", exc)
+    return None
+
+
+def guardar_mensaje(conversacion_id: str, rol: str, contenido: str, tokens: int = 0) -> None:
+    """Guarda un mensaje en Supabase."""
+    sb = get_supabase()
+    if not sb or not conversacion_id:
+        return
+    try:
+        sb.table("mensajes").insert({
+            "conversacion_id": conversacion_id,
+            "rol": rol,
+            "contenido": contenido if isinstance(contenido, str) else json.dumps(contenido, ensure_ascii=False),
+            "timestamp": datetime.utcnow().isoformat(),
+            "tokens_usados": tokens
+        }).execute()
+    except Exception as exc:
+        logging.error("Error guardar_mensaje | %s", exc)
+
+
+def cargar_historial(cliente_id: str, limite: int = 20) -> list[dict]:
+    """Carga el historial reciente del cliente desde Supabase."""
+    sb = get_supabase()
+    if not sb:
+        return []
+    try:
+        # Buscar conversaciones recientes del cliente
+        convs = sb.table("conversaciones") \
+            .select("id") \
+            .eq("cliente_id", cliente_id) \
+            .order("fecha_inicio", desc=True) \
+            .limit(3) \
+            .execute()
+        if not convs.data:
+            return []
+        conv_ids = [c["id"] for c in convs.data]
+
+        # Cargar mensajes de esas conversaciones
+        mensajes = sb.table("mensajes") \
+            .select("rol, contenido, timestamp") \
+            .in_("conversacion_id", conv_ids) \
+            .order("timestamp", desc=False) \
+            .limit(limite) \
+            .execute()
+
+        historial = []
+        for m in mensajes.data:
+            contenido = m["contenido"]
+            try:
+                contenido = json.loads(contenido)
+            except Exception:
+                pass
+            historial.append({"role": m["rol"], "content": contenido})
+        return historial
+    except Exception as exc:
+        logging.error("Error cargar_historial | %s", exc)
+    return []
+
+
+def actualizar_contexto(cliente_id: str, pregunta: str, respuesta: str) -> None:
+    """Actualiza el contexto del cliente con la última interacción."""
+    sb = get_supabase()
+    if not sb:
+        return
+    try:
+        # Verificar si ya existe contexto
+        existing = sb.table("contexto_cliente").select("id, preguntas_frecuentes").eq("cliente_id", cliente_id).execute()
+
+        if existing.data:
+            ctx = existing.data[0]
+            preguntas = ctx.get("preguntas_frecuentes") or []
+            if isinstance(preguntas, str):
+                preguntas = json.loads(preguntas)
+
+            # Agregar pregunta si no está ya registrada
+            if pregunta not in preguntas:
+                preguntas = ([pregunta] + preguntas)[:20]  # máximo 20 preguntas frecuentes
+
+            sb.table("contexto_cliente").update({
+                "preguntas_frecuentes": preguntas,
+                "ultimo_dato": {"pregunta": pregunta, "respuesta": respuesta[:500]},
+                "actualizado_en": datetime.utcnow().isoformat()
+            }).eq("cliente_id", cliente_id).execute()
+        else:
+            sb.table("contexto_cliente").insert({
+                "cliente_id": cliente_id,
+                "preguntas_frecuentes": [pregunta],
+                "ultimo_dato": {"pregunta": pregunta, "respuesta": respuesta[:500]},
+                "pais": "Chile",
+                "actualizado_en": datetime.utcnow().isoformat()
+            }).execute()
+    except Exception as exc:
+        logging.error("Error actualizar_contexto | %s", exc)
+
 
 # ──────────────────────────────────────────────────────────────
 # Fudo API Client
@@ -65,7 +239,6 @@ class FudoClient:
             return self._token  # type: ignore[return-value]
 
     def get(self, endpoint: str, raw_query: str | None = None) -> Any:
-        """GET autenticado con reintento automático ante token expirado."""
         url = f"{FUDO_BASE_URL}{endpoint}"
         if raw_query:
             url = f"{url}?{raw_query}"
@@ -89,7 +262,6 @@ _fudo_client = FudoClient()
 
 
 def _fudo_get(endpoint: str, raw_query: str | None = None) -> dict:
-    """Llama a Fudo y retorna un dict de error en vez de lanzar excepción."""
     if not _FUDO_ENABLED:
         return {"error": "Fudo no configurado. Agrega FUDO_API_KEY y FUDO_API_SECRET al .env"}
     try:
@@ -100,28 +272,23 @@ def _fudo_get(endpoint: str, raw_query: str | None = None) -> dict:
 
 
 # ──────────────────────────────────────────────────────────────
-# Funciones de consulta (solo lectura)
+# Funciones de consulta Fudo (solo lectura)
 # ──────────────────────────────────────────────────────────────
 
 def _date_filter(from_date: str, to_date: str) -> str:
     return f"and(gte.{from_date}T00:00:00Z,lte.{to_date}T23:59:59Z)"
 
-
 def get_sales_report(from_date: str, to_date: str) -> dict:
     return _fudo_get("/sales", f"filter[createdAt]={_date_filter(from_date, to_date)}")
-
 
 def get_top_products(from_date: str, to_date: str, limit: int = 10) -> dict:
     return _fudo_get("/sales", f"filter[createdAt]={_date_filter(from_date, to_date)}&page[size]=100&include=items.product&sort=-createdAt")
 
-
 def get_waste_report() -> dict:
     return _fudo_get("/ingredients", "page[size]=100&sort=name&include=ingredientCategory,unit&filter[stockControl]=eq.true")
 
-
 def get_deliveries_report(from_date: str, to_date: str) -> dict:
     return _fudo_get("/sales", f"filter[createdAt]={_date_filter(from_date, to_date)}&filter[saleType]=DELIVERY&page[size]=100&include=items")
-
 
 def get_orders(from_date: str, to_date: str, status: str = "all") -> dict:
     query = f"filter[createdAt]={_date_filter(from_date, to_date)}&page[size]=100&include=items.product,payments.paymentMethod"
@@ -129,37 +296,27 @@ def get_orders(from_date: str, to_date: str, status: str = "all") -> dict:
         query += f"&filter[saleState]=in.({status})"
     return _fudo_get("/sales", query)
 
-
-def compare_periods(
-    period1_from: str, period1_to: str, period2_from: str, period2_to: str
-) -> dict:
+def compare_periods(period1_from: str, period1_to: str, period2_from: str, period2_to: str) -> dict:
     p1 = get_sales_report(period1_from, period1_to)
     p2 = get_sales_report(period2_from, period2_to)
     if "error" in p1 or "error" in p2:
         return {"periodo_base": p1, "periodo_comparado": p2}
     try:
         def _total(d: dict) -> float:
-            return float(
-                d.get("total") or d.get("totalRevenue") or d.get("total_revenue") or 0
-            )
+            return float(d.get("total") or d.get("totalRevenue") or d.get("total_revenue") or 0)
         t1, t2 = _total(p1), _total(p2)
         diff = t2 - t1
         pct = round(diff / t1 * 100, 2) if t1 else None
         return {
             "periodo_base": {"desde": period1_from, "hasta": period1_to, "datos": p1},
             "periodo_comparado": {"desde": period2_from, "hasta": period2_to, "datos": p2},
-            "comparacion": {
-                "diferencia": round(diff, 2),
-                "variacion_porcentual": pct if pct is not None else "N/A",
-            },
+            "comparacion": {"diferencia": round(diff, 2), "variacion_porcentual": pct if pct is not None else "N/A"},
         }
     except Exception:
         return {"periodo_base": p1, "periodo_comparado": p2}
 
-
 def get_categories_sales() -> dict:
     return _fudo_get("/product-categories", "page[size]=100&sort=name&include=products")
-
 
 def get_products(name: str | None = None, active: bool = True, stock_control: bool | None = None) -> dict:
     query = "filter[active]=eq.true&page[size]=100&sort=name&include=productCategory"
@@ -169,7 +326,6 @@ def get_products(name: str | None = None, active: bool = True, stock_control: bo
         query += "&filter[stockControl]=eq.true"
     return _fudo_get("/products", query)
 
-
 def get_ingredients(name: str | None = None, stock_control: bool | None = None) -> dict:
     query = "page[size]=100&sort=name&include=ingredientCategory,unit&fields[ingredient]=cost,minStock,name,shrinkage,stock,stockControl"
     if stock_control:
@@ -178,43 +334,29 @@ def get_ingredients(name: str | None = None, stock_control: bool | None = None) 
         query += f"&filter[name]={name}"
     return _fudo_get("/ingredients", query)
 
-
 def get_stock_status() -> dict:
     return _fudo_get("/ingredients", "filter[stockControl]=eq.true&page[size]=100&sort=name&fields[ingredient]=cost,minStock,name,shrinkage,stock,stockControl&include=unit")
 
-
 def get_last_stock_count() -> dict:
-    return _fudo_get(
-        "/products",
-        "filter[stockControl]=eq.true&page[size]=100&sort=name&fields[product]=name,stock,minStock,lastStockCountAt,stockControl"
-    )
-
+    return _fudo_get("/products", "filter[stockControl]=eq.true&page[size]=100&sort=name&fields[product]=name,stock,minStock,lastStockCountAt,stockControl")
 
 def get_expenses(from_date: str, to_date: str, category_id: str | None = None) -> dict:
-    query = (
-        f"filter[createdAt]=and(gte.{from_date}T00:00:00Z,lte.{to_date}T23:59:59Z)"
-        "&page[size]=100&sort=-date&include=expenseCategory,provider,payments.paymentMethod"
-    )
+    query = (f"filter[createdAt]=and(gte.{from_date}T00:00:00Z,lte.{to_date}T23:59:59Z)"
+             "&page[size]=100&sort=-date&include=expenseCategory,provider,payments.paymentMethod")
     if category_id:
         query += f"&filter[expenseCategoryId]={category_id}"
     return _fudo_get("/expenses", query)
 
-
 def get_expense_categories() -> dict:
     return _fudo_get("/expense-categories", "page[size]=100&sort=name")
 
-
 def get_payments(from_date: str, to_date: str, canceled: bool = False) -> dict:
-    query = (
-        f"filter[createdAt]=and(gte.{from_date}T00:00:00Z,lte.{to_date}T23:59:59Z)"
-        "&filter[canceled]=false&page[size]=100&sort=-id&include=paymentMethod"
-    )
+    query = (f"filter[createdAt]=and(gte.{from_date}T00:00:00Z,lte.{to_date}T23:59:59Z)"
+             "&filter[canceled]=false&page[size]=100&sort=-id&include=paymentMethod")
     return _fudo_get("/payments", query)
-
 
 def get_payment_methods() -> dict:
     return _fudo_get("/payment-methods", "page[size]=50")
-
 
 def get_customers(name: str | None = None, active: bool = True) -> dict:
     query = "filter[active]=eq.true&page[size]=100&sort=name"
@@ -222,13 +364,11 @@ def get_customers(name: str | None = None, active: bool = True) -> dict:
         query += f"&filter[@all]={name}"
     return _fudo_get("/customers", query)
 
-
 def get_tables(include_active_sales: bool = False) -> dict:
     query = "page[size]=100&sort=number"
     if include_active_sales:
         query += "&include=activeSales,room"
     return _fudo_get("/tables", query)
-
 
 def get_product_categories() -> dict:
     return _fudo_get("/product-categories", "page[size]=100&sort=name&include=products")
@@ -256,16 +396,13 @@ _TOOL_FUNCTIONS: dict[str, Any] = {
 }
 
 # ──────────────────────────────────────────────────────────────
-# Definición de herramientas para Claude
+# Herramientas Claude
 # ──────────────────────────────────────────────────────────────
 
 FUDO_TOOLS = [
     {
         "name": "get_sales_report",
-        "description": (
-            "Obtiene el reporte de ventas de Fudo para un rango de fechas. "
-            "Incluye total recaudado, cantidad de tickets/órdenes y ticket promedio."
-        ),
+        "description": "Obtiene el reporte de ventas de Fudo para un rango de fechas. Incluye total recaudado, cantidad de tickets/órdenes y ticket promedio.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -290,12 +427,8 @@ FUDO_TOOLS = [
     },
     {
         "name": "get_waste_report",
-        "description": "Obtiene los ingredientes/insumos con control de stock para ver niveles de inventario y merma. No requiere fechas.",
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
+        "description": "Obtiene los ingredientes/insumos con control de stock para ver niveles de inventario y merma.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "get_deliveries_report",
@@ -317,20 +450,14 @@ FUDO_TOOLS = [
             "properties": {
                 "from_date": {"type": "string", "description": "Fecha de inicio YYYY-MM-DD"},
                 "to_date": {"type": "string", "description": "Fecha de fin YYYY-MM-DD"},
-                "status": {
-                    "type": "string",
-                    "description": "Estado: 'completed', 'cancelled', 'all' (default 'all')",
-                },
+                "status": {"type": "string", "description": "Estado: 'completed', 'cancelled', 'all' (default 'all')"},
             },
             "required": ["from_date", "to_date"],
         },
     },
     {
         "name": "compare_periods",
-        "description": (
-            "Compara ventas entre dos períodos. "
-            "Útil para: esta semana vs la anterior, este mes vs el anterior, etc."
-        ),
+        "description": "Compara ventas entre dos períodos. Útil para: esta semana vs la anterior, este mes vs el anterior.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -344,19 +471,12 @@ FUDO_TOOLS = [
     },
     {
         "name": "get_categories_sales",
-        "description": "Obtiene las categorías del menú con los productos que contiene cada una. No requiere fechas.",
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
+        "description": "Obtiene las categorías del menú con los productos que contiene cada una.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "get_products",
-        "description": (
-            "Obtiene el listado de productos activos del menú con sus categorías. "
-            "Usa name para buscar un producto específico. Usa stock_control=true para filtrar los que llevan control de stock."
-        ),
+        "description": "Obtiene el listado de productos activos del menú con sus categorías.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -368,10 +488,7 @@ FUDO_TOOLS = [
     },
     {
         "name": "get_ingredients",
-        "description": (
-            "Obtiene ingredientes/insumos con su stock actual, unidad y categoría. "
-            "Sirve para consultar inventario y merma. Usa name para buscar un insumo específico."
-        ),
+        "description": "Obtiene ingredientes/insumos con su stock actual, unidad y categoría.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -383,28 +500,17 @@ FUDO_TOOLS = [
     },
     {
         "name": "get_stock_status",
-        "description": "Obtiene el estado actual del stock de todos los ingredientes con control de inventario. Muestra stock actual, stock mínimo y shrinkage (merma) de cada insumo.",
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
+        "description": "Obtiene el estado actual del stock de todos los ingredientes con control de inventario.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "get_last_stock_count",
-        "description": "Obtiene los productos con control de stock y la fecha de su último conteo de inventario (lastStockCountAt). Usar cuando pregunten cuándo fue el último inventario, último conteo, o quieren ver el historial de conteos.",
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
+        "description": "Obtiene los productos con control de stock y la fecha de su último conteo de inventario.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "get_expenses",
-        "description": (
-            "Obtiene los gastos/egresos registrados en un rango de fechas. "
-            "Incluye categoría, proveedor y método de pago. Usa category_id para filtrar por categoría."
-        ),
+        "description": "Obtiene los gastos/egresos registrados en un rango de fechas.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -418,18 +524,11 @@ FUDO_TOOLS = [
     {
         "name": "get_expense_categories",
         "description": "Obtiene todas las categorías de gastos/egresos disponibles en Fudo.",
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
+        "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "get_payments",
-        "description": (
-            "Obtiene los pagos recibidos en un rango de fechas con el método de pago de cada uno. "
-            "Útil para ver totales por efectivo, tarjeta, transferencia, etc."
-        ),
+        "description": "Obtiene los pagos recibidos en un rango de fechas con el método de pago de cada uno.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -441,19 +540,12 @@ FUDO_TOOLS = [
     },
     {
         "name": "get_payment_methods",
-        "description": "Obtiene todos los métodos de pago configurados en Fudo (efectivo, tarjeta, QR, etc.).",
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
+        "description": "Obtiene todos los métodos de pago configurados en Fudo.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "get_customers",
-        "description": (
-            "Obtiene el listado de clientes activos. "
-            "Usa name para buscar un cliente por nombre, teléfono o email."
-        ),
+        "description": "Obtiene el listado de clientes activos.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -464,17 +556,11 @@ FUDO_TOOLS = [
     },
     {
         "name": "get_tables",
-        "description": (
-            "Obtiene el estado de las mesas. "
-            "Usa include_active_sales=true para ver cuáles tienen ventas activas en este momento."
-        ),
+        "description": "Obtiene el estado de las mesas.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "include_active_sales": {
-                    "type": "boolean",
-                    "description": "Si true, incluye las ventas activas en cada mesa (para ver qué mesas están ocupadas)",
-                },
+                "include_active_sales": {"type": "boolean", "description": "Si true, incluye las ventas activas en cada mesa"},
             },
             "required": [],
         },
@@ -482,11 +568,7 @@ FUDO_TOOLS = [
     {
         "name": "get_product_categories",
         "description": "Obtiene todas las categorías de productos del menú con los productos que contiene cada una.",
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
+        "input_schema": {"type": "object", "properties": {}, "required": []},
     },
 ]
 
@@ -511,27 +593,23 @@ VENTAS Y PEDIDOS:
 
 PRODUCTOS E INVENTARIO:
 - "¿Qué productos tenemos?" / "¿Está activo el producto X?" → get_products
-- "¿Cuánto stock tiene el ingrediente X?" / "¿Qué hay en inventario?" → get_ingredients (usa stock_control=true si preguntan solo los que tienen control de stock)
-- "¿Cuánto stock queda de X?" → get_stock_status o get_ingredients con name. El stock es numérico sin unidad especificada en Fudo.
+- "¿Cuánto stock tiene el ingrediente X?" → get_ingredients
+- "¿Cuánto stock queda de X?" → get_stock_status o get_ingredients con name
 - "¿Qué ingredientes tienen merma?" → get_stock_status, mostrar los que tienen shrinkage > 0
 - "¿Hay ingredientes sin stock?" → get_stock_status, mostrar los que tienen stock = null o stock = 0
-- "¿Cuándo fue el último inventario?" → get_last_stock_count, buscar el lastStockCountAt más reciente entre todos los productos y mostrarlo como fecha legible
-- "¿Cuándo se hizo el último conteo de stock?" → get_last_stock_count
-- "¿Hay diferencias significativas en stock?" → Comparar stock actual vs minStock. Si minStock es null en todos, avisar que no hay mínimos configurados en Fudo y sugerir configurarlos.
+- "¿Cuándo fue el último inventario?" → get_last_stock_count
 - "¿Cuáles son las categorías del menú?" → get_product_categories
 
 GASTOS Y EGRESOS:
 - "¿Cuáles son los gastos de hoy / esta semana?" → get_expenses con from_date y to_date
 - "¿Cuáles son las categorías de gastos?" → get_expense_categories
-- Para filtrar por categoría, primero llama get_expense_categories para obtener el ID
 
 PAGOS:
-- "¿Cuánto se cobró hoy en efectivo / tarjeta?" → get_payments para obtener los pagos, luego agrupa por método
+- "¿Cuánto se cobró hoy en efectivo / tarjeta?" → get_payments
 - "¿Cuáles son los métodos de pago?" → get_payment_methods
 
 CLIENTES:
 - "¿Cuántos clientes tenemos?" / "Busca el cliente X" → get_customers
-- Para buscar por nombre, teléfono o email usa el parámetro name
 
 MESAS:
 - "¿Qué mesas están ocupadas ahora?" → get_tables con include_active_sales=true
@@ -541,13 +619,12 @@ Responde de forma clara y directa. Cuando muestres montos usa el formato local (
 Para preguntas que no son del negocio, responde normalmente."""
 
 # ──────────────────────────────────────────────────────────────
-# Claude con tool_use
+# Claude con tool_use y memoria Supabase
 # ──────────────────────────────────────────────────────────────
 
 _anthropic = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-conversation_histories: dict[str, list[dict]] = {}
-
-_MAX_HISTORY = 40  # máximo de mensajes guardados por número
+conversation_histories: dict[str, list[dict]] = {}  # fallback RAM
+_MAX_HISTORY = 40
 
 
 def _execute_tool(name: str, tool_input: dict) -> Any:
@@ -562,13 +639,26 @@ def _execute_tool(name: str, tool_input: dict) -> Any:
 
 
 def ask_claude(user_message: str, phone_number: str) -> str:
-    history = conversation_histories.setdefault(phone_number, [])
+    # ── Memoria: identificar cliente y cargar historial ──
+    cliente_id = get_or_create_cliente(phone_number)
+    conversacion_id = get_or_create_conversacion(cliente_id) if cliente_id else None
+
+    if cliente_id:
+        history = cargar_historial(cliente_id)
+        logging.info("Historial cargado | cliente=%s | mensajes=%d", cliente_id, len(history))
+    else:
+        # Fallback a RAM si Supabase no está disponible
+        history = conversation_histories.setdefault(phone_number, [])
+
+    # Guardar mensaje del usuario
+    guardar_mensaje(conversacion_id, "user", user_message)
     history.append({"role": "user", "content": user_message})
 
     system = SYSTEM_PROMPT.format(today=datetime.now().strftime("%Y-%m-%d"))
     active_tools = FUDO_TOOLS if _FUDO_ENABLED else []
+    final_response = ""
 
-    for _ in range(10):  # máximo 10 rondas de tool_use por mensaje
+    for _ in range(10):
         kwargs: dict = dict(
             model="claude-sonnet-4-6",
             max_tokens=2048,
@@ -588,25 +678,31 @@ def ask_claude(user_message: str, phone_number: str) -> str:
                     logging.info("Tool call | %s | input=%s", block.name, block.input)
                     result = _execute_tool(block.name, block.input)
                     logging.info("Tool result | %s | %s", block.name, str(result)[:300])
-                    tool_results.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": json.dumps(result, ensure_ascii=False),
-                        }
-                    )
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": json.dumps(result, ensure_ascii=False),
+                    })
             history.append({"role": "user", "content": tool_results})
             continue
 
-        # end_turn u otro stop_reason → respuesta final
+        # Respuesta final
         text = next((b.text for b in response.content if hasattr(b, "text")), "")
         history.append({"role": "assistant", "content": response.content})
+        final_response = text
 
-        # Recortar historial si creció demasiado
-        if len(history) > _MAX_HISTORY:
+        # Guardar respuesta en Supabase
+        guardar_mensaje(conversacion_id, "assistant", text, tokens=response.usage.output_tokens if response.usage else 0)
+
+        # Actualizar contexto del cliente
+        if cliente_id:
+            actualizar_contexto(cliente_id, user_message, text)
+
+        # Recortar historial RAM si se usa como fallback
+        if not cliente_id and len(history) > _MAX_HISTORY:
             conversation_histories[phone_number] = history[-_MAX_HISTORY:]
 
-        return text
+        return final_response
 
     return "Lo siento, no pude procesar tu consulta en este momento."
 
@@ -674,7 +770,12 @@ def webhook_receive():
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "fudo": "habilitado" if _FUDO_ENABLED else "no configurado"})
+    sb_status = "conectado" if get_supabase() else "no configurado"
+    return jsonify({
+        "status": "ok",
+        "fudo": "habilitado" if _FUDO_ENABLED else "no configurado",
+        "supabase": sb_status
+    })
 
 
 @app.route("/message", methods=["POST"])
