@@ -1,3 +1,4 @@
+import contextvars
 import json
 import logging
 import os
@@ -21,10 +22,23 @@ load_dotenv()
 for _var in ["ANTHROPIC_API_KEY", "WHATSAPP_TOKEN", "WHATSAPP_PHONE_ID", "WHATSAPP_VERIFY_TOKEN", "SUPABASE_URL", "SUPABASE_KEY"]:
     logging.info("ENV CHECK | %s = %s", _var, "SET" if os.environ.get(_var) else "*** MISSING ***")
 
-_FUDO_ENABLED = bool(os.environ.get("FUDO_API_KEY") and os.environ.get("FUDO_API_SECRET"))
-logging.info("FUDO | habilitado=%s", _FUDO_ENABLED)
+# Fudo "global" queda solo como fallback para el cliente demo / pruebas locales
+_FUDO_GLOBAL_ENABLED = bool(os.environ.get("FUDO_API_KEY") and os.environ.get("FUDO_API_SECRET"))
+logging.info("FUDO global (fallback) | habilitado=%s", _FUDO_GLOBAL_ENABLED)
 
 app = Flask(__name__)
+
+# ──────────────────────────────────────────────────────────────
+# Contexto del cliente actual (multi-tenant)
+# ──────────────────────────────────────────────────────────────
+# Cada request de WhatsApp puede venir de un restaurante distinto.
+# Usamos contextvars para que, dentro de una misma petición, todas las
+# funciones de Fudo sepan automáticamente "de qué cliente son los datos"
+# sin tener que pasar el cliente_id manualmente en cada llamada de tool_use.
+
+_current_fudo_client: contextvars.ContextVar = contextvars.ContextVar("current_fudo_client", default=None)
+_current_cliente_info: contextvars.ContextVar = contextvars.ContextVar("current_cliente_info", default=None)
+
 
 # ──────────────────────────────────────────────────────────────
 # Supabase Client
@@ -47,19 +61,19 @@ def get_supabase() -> Client | None:
 
 
 # ──────────────────────────────────────────────────────────────
-# Funciones de memoria (Supabase)
+# Funciones de memoria + credenciales por cliente (Supabase)
 # ──────────────────────────────────────────────────────────────
 
-def get_or_create_cliente(phone_number: str) -> str | None:
-    """Busca el cliente por número de WhatsApp. Si no existe, lo crea."""
+def get_cliente_completo(phone_number: str) -> dict | None:
+    """Busca el cliente por número de WhatsApp con TODOS sus datos (incluye credenciales Fudo).
+    Si no existe, lo crea sin credenciales (quedará pendiente de configurar)."""
     sb = get_supabase()
     if not sb:
         return None
     try:
-        result = sb.table("clientes").select("id").eq("whatsapp_number_user", phone_number).execute()
+        result = sb.table("clientes").select("*").eq("whatsapp_number_user", phone_number).execute()
         if result.data:
-            return result.data[0]["id"]
-        # Crear cliente nuevo automáticamente
+            return result.data[0]
         nuevo = sb.table("clientes").insert({
             "nombre_restaurante": f"Cliente {phone_number}",
             "pais": "Chile",
@@ -68,11 +82,11 @@ def get_or_create_cliente(phone_number: str) -> str | None:
             "activo": True
         }).execute()
         if nuevo.data:
-            cliente_id = nuevo.data[0]["id"]
-            logging.info("Nuevo cliente creado | id=%s | phone=%s", cliente_id, phone_number)
-            return cliente_id
+            cliente = nuevo.data[0]
+            logging.info("Nuevo cliente creado | id=%s | phone=%s", cliente["id"], phone_number)
+            return cliente
     except Exception as exc:
-        logging.error("Error get_or_create_cliente | %s", exc)
+        logging.error("Error get_cliente_completo | %s", exc)
     return None
 
 
@@ -82,7 +96,6 @@ def get_or_create_conversacion(cliente_id: str) -> str | None:
     if not sb:
         return None
     try:
-        # Buscar conversación activa (sin fecha_fin, de las últimas 2 horas)
         desde = (datetime.utcnow() - timedelta(hours=2)).isoformat()
         result = sb.table("conversaciones") \
             .select("id") \
@@ -94,7 +107,6 @@ def get_or_create_conversacion(cliente_id: str) -> str | None:
             .execute()
         if result.data:
             return result.data[0]["id"]
-        # Crear nueva conversación
         nueva = sb.table("conversaciones").insert({
             "cliente_id": cliente_id,
             "fecha_inicio": datetime.utcnow().isoformat(),
@@ -108,7 +120,6 @@ def get_or_create_conversacion(cliente_id: str) -> str | None:
 
 
 def guardar_mensaje(conversacion_id: str, rol: str, contenido: str, tokens: int = 0) -> None:
-    """Guarda un mensaje en Supabase."""
     sb = get_supabase()
     if not sb or not conversacion_id:
         return
@@ -125,12 +136,10 @@ def guardar_mensaje(conversacion_id: str, rol: str, contenido: str, tokens: int 
 
 
 def cargar_historial(cliente_id: str, limite: int = 20) -> list[dict]:
-    """Carga el historial reciente del cliente desde Supabase."""
     sb = get_supabase()
     if not sb:
         return []
     try:
-        # Buscar conversaciones recientes del cliente
         convs = sb.table("conversaciones") \
             .select("id") \
             .eq("cliente_id", cliente_id) \
@@ -141,7 +150,6 @@ def cargar_historial(cliente_id: str, limite: int = 20) -> list[dict]:
             return []
         conv_ids = [c["id"] for c in convs.data]
 
-        # Cargar mensajes de esas conversaciones
         mensajes = sb.table("mensajes") \
             .select("rol, contenido, timestamp") \
             .in_("conversacion_id", conv_ids) \
@@ -164,12 +172,10 @@ def cargar_historial(cliente_id: str, limite: int = 20) -> list[dict]:
 
 
 def actualizar_contexto(cliente_id: str, pregunta: str, respuesta: str) -> None:
-    """Actualiza el contexto del cliente con la última interacción."""
     sb = get_supabase()
     if not sb:
         return
     try:
-        # Verificar si ya existe contexto
         existing = sb.table("contexto_cliente").select("id, preguntas_frecuentes").eq("cliente_id", cliente_id).execute()
 
         if existing.data:
@@ -178,9 +184,8 @@ def actualizar_contexto(cliente_id: str, pregunta: str, respuesta: str) -> None:
             if isinstance(preguntas, str):
                 preguntas = json.loads(preguntas)
 
-            # Agregar pregunta si no está ya registrada
             if pregunta not in preguntas:
-                preguntas = ([pregunta] + preguntas)[:20]  # máximo 20 preguntas frecuentes
+                preguntas = ([pregunta] + preguntas)[:20]
 
             sb.table("contexto_cliente").update({
                 "preguntas_frecuentes": preguntas,
@@ -200,7 +205,7 @@ def actualizar_contexto(cliente_id: str, pregunta: str, respuesta: str) -> None:
 
 
 # ──────────────────────────────────────────────────────────────
-# Fudo API Client
+# Fudo API Client (ahora instanciable por cliente)
 # ──────────────────────────────────────────────────────────────
 
 FUDO_BASE_URL = os.environ.get("FUDO_BASE_URL", "https://api.fu.do/v1alpha1")
@@ -208,11 +213,12 @@ FUDO_AUTH_URL = "https://auth.fu.do/api"
 
 
 class FudoClient:
-    """Cliente de solo lectura para la API de Fudo con renovación automática de token."""
+    """Cliente de solo lectura para la API de Fudo con renovación automática de token.
+    Recibe sus propias credenciales — ya no depende de variables de entorno globales."""
 
-    def __init__(self) -> None:
-        self.api_key = os.environ.get("FUDO_API_KEY", "")
-        self.api_secret = os.environ.get("FUDO_API_SECRET", "")
+    def __init__(self, api_key: str, api_secret: str) -> None:
+        self.api_key = api_key
+        self.api_secret = api_secret
         self._token: str | None = None
         self._token_expiry: datetime | None = None
         self._lock = threading.Lock()
@@ -258,14 +264,44 @@ class FudoClient:
         raise RuntimeError("Fudo: autenticación fallida tras 2 intentos")
 
 
-_fudo_client = FudoClient()
+# Cache de clientes Fudo ya creados, para no recrear el objeto (y perder el token) en cada mensaje
+_fudo_clients_cache: dict[str, FudoClient] = {}
+_fudo_cache_lock = threading.Lock()
+
+
+def get_fudo_client_for(cliente_info: dict | None) -> FudoClient | None:
+    """Obtiene (o crea) el FudoClient correspondiente a las credenciales de ESTE cliente."""
+    if not cliente_info:
+        return None
+
+    fudo_key = cliente_info.get("fudo_key")
+    fudo_secret = cliente_info.get("fudo_secret")
+
+    # Fallback: si el cliente no tiene credenciales propias, usar las globales de Railway
+    # (útil para el restaurante demo / pruebas, antes de tener credenciales reales por cliente)
+    if (not fudo_key or not fudo_secret or fudo_key == "TU_FUDO_KEY_AQUI") and _FUDO_GLOBAL_ENABLED:
+        fudo_key = os.environ.get("FUDO_API_KEY")
+        fudo_secret = os.environ.get("FUDO_API_SECRET")
+
+    if not fudo_key or not fudo_secret or fudo_key == "TU_FUDO_KEY_AQUI":
+        return None
+
+    cache_key = f"{cliente_info.get('id')}:{fudo_key}"
+    with _fudo_cache_lock:
+        if cache_key in _fudo_clients_cache:
+            return _fudo_clients_cache[cache_key]
+        client = FudoClient(fudo_key, fudo_secret)
+        _fudo_clients_cache[cache_key] = client
+        return client
 
 
 def _fudo_get(endpoint: str, raw_query: str | None = None) -> dict:
-    if not _FUDO_ENABLED:
-        return {"error": "Fudo no configurado. Agrega FUDO_API_KEY y FUDO_API_SECRET al .env"}
+    """Llama a Fudo usando el cliente del restaurante activo en este momento (contextvar)."""
+    client = _current_fudo_client.get()
+    if not client:
+        return {"error": "Fudo no configurado para este restaurante. Faltan credenciales fudo_key / fudo_secret."}
     try:
-        return _fudo_client.get(endpoint, raw_query)
+        return client.get(endpoint, raw_query)
     except Exception as exc:
         logging.error("Fudo API error | endpoint=%s | %s", endpoint, exc)
         return {"error": str(exc)}
@@ -577,7 +613,7 @@ FUDO_TOOLS = [
 # ──────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """Eres el asistente de negocio del dueño, disponible por WhatsApp.
-Tienes acceso en tiempo real a los datos de Fudo (sistema de gestión del local).
+Tienes acceso en tiempo real a los datos de Fudo (sistema de gestión del local de {nombre_restaurante}).
 La fecha de hoy es {today}.
 
 Cuando el dueño pregunta sobre su negocio, usas las herramientas de Fudo para consultar datos reales y responder con información precisa.
@@ -619,7 +655,7 @@ Responde de forma clara y directa. Cuando muestres montos usa el formato local (
 Para preguntas que no son del negocio, responde normalmente."""
 
 # ──────────────────────────────────────────────────────────────
-# Claude con tool_use y memoria Supabase
+# Claude con tool_use, memoria Supabase y Fudo multi-cliente
 # ──────────────────────────────────────────────────────────────
 
 _anthropic = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
@@ -639,72 +675,78 @@ def _execute_tool(name: str, tool_input: dict) -> Any:
 
 
 def ask_claude(user_message: str, phone_number: str) -> str:
-    # ── Memoria: identificar cliente y cargar historial ──
-    cliente_id = get_or_create_cliente(phone_number)
+    # ── Identificar cliente y SUS credenciales Fudo ──
+    cliente_info = get_cliente_completo(phone_number)
+    cliente_id = cliente_info.get("id") if cliente_info else None
     conversacion_id = get_or_create_conversacion(cliente_id) if cliente_id else None
 
-    if cliente_id:
-        history = cargar_historial(cliente_id)
-        logging.info("Historial cargado | cliente=%s | mensajes=%d", cliente_id, len(history))
-    else:
-        # Fallback a RAM si Supabase no está disponible
-        history = conversation_histories.setdefault(phone_number, [])
+    # Activar el contexto: a partir de aquí, todas las funciones get_* de Fudo
+    # usarán automáticamente las credenciales de ESTE restaurante.
+    fudo_client = get_fudo_client_for(cliente_info)
+    token_fudo = _current_fudo_client.set(fudo_client)
+    token_info = _current_cliente_info.set(cliente_info)
 
-    # Guardar mensaje del usuario
-    guardar_mensaje(conversacion_id, "user", user_message)
-    history.append({"role": "user", "content": user_message})
-
-    system = SYSTEM_PROMPT.format(today=datetime.now().strftime("%Y-%m-%d"))
-    active_tools = FUDO_TOOLS if _FUDO_ENABLED else []
-    final_response = ""
-
-    for _ in range(10):
-        kwargs: dict = dict(
-            model="claude-sonnet-4-6",
-            max_tokens=2048,
-            system=system,
-            messages=history,
-        )
-        if active_tools:
-            kwargs["tools"] = active_tools
-
-        response = _anthropic.messages.create(**kwargs)
-
-        if response.stop_reason == "tool_use":
-            history.append({"role": "assistant", "content": response.content})
-            tool_results = []
-            for block in response.content:
-                if block.type == "tool_use":
-                    logging.info("Tool call | %s | input=%s", block.name, block.input)
-                    result = _execute_tool(block.name, block.input)
-                    logging.info("Tool result | %s | %s", block.name, str(result)[:300])
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": json.dumps(result, ensure_ascii=False),
-                    })
-            history.append({"role": "user", "content": tool_results})
-            continue
-
-        # Respuesta final
-        text = next((b.text for b in response.content if hasattr(b, "text")), "")
-        history.append({"role": "assistant", "content": response.content})
-        final_response = text
-
-        # Guardar respuesta en Supabase
-        guardar_mensaje(conversacion_id, "assistant", text, tokens=response.usage.output_tokens if response.usage else 0)
-
-        # Actualizar contexto del cliente
+    try:
         if cliente_id:
-            actualizar_contexto(cliente_id, user_message, text)
+            history = cargar_historial(cliente_id)
+            logging.info("Historial cargado | cliente=%s | mensajes=%d", cliente_id, len(history))
+        else:
+            history = conversation_histories.setdefault(phone_number, [])
 
-        # Recortar historial RAM si se usa como fallback
-        if not cliente_id and len(history) > _MAX_HISTORY:
-            conversation_histories[phone_number] = history[-_MAX_HISTORY:]
+        guardar_mensaje(conversacion_id, "user", user_message)
+        history.append({"role": "user", "content": user_message})
 
-        return final_response
+        nombre_restaurante = (cliente_info or {}).get("nombre_restaurante", "tu negocio")
+        system = SYSTEM_PROMPT.format(today=datetime.now().strftime("%Y-%m-%d"), nombre_restaurante=nombre_restaurante)
+        active_tools = FUDO_TOOLS if fudo_client else []
+        final_response = ""
 
-    return "Lo siento, no pude procesar tu consulta en este momento."
+        for _ in range(10):
+            kwargs: dict = dict(
+                model="claude-sonnet-4-6",
+                max_tokens=2048,
+                system=system,
+                messages=history,
+            )
+            if active_tools:
+                kwargs["tools"] = active_tools
+
+            response = _anthropic.messages.create(**kwargs)
+
+            if response.stop_reason == "tool_use":
+                history.append({"role": "assistant", "content": response.content})
+                tool_results = []
+                for block in response.content:
+                    if block.type == "tool_use":
+                        logging.info("Tool call | cliente=%s | %s | input=%s", cliente_id, block.name, block.input)
+                        result = _execute_tool(block.name, block.input)
+                        logging.info("Tool result | %s | %s", block.name, str(result)[:300])
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": json.dumps(result, ensure_ascii=False),
+                        })
+                history.append({"role": "user", "content": tool_results})
+                continue
+
+            text = next((b.text for b in response.content if hasattr(b, "text")), "")
+            history.append({"role": "assistant", "content": response.content})
+            final_response = text
+
+            guardar_mensaje(conversacion_id, "assistant", text, tokens=response.usage.output_tokens if response.usage else 0)
+
+            if cliente_id:
+                actualizar_contexto(cliente_id, user_message, text)
+
+            if not cliente_id and len(history) > _MAX_HISTORY:
+                conversation_histories[phone_number] = history[-_MAX_HISTORY:]
+
+            return final_response
+
+        return "Lo siento, no pude procesar tu consulta en este momento."
+    finally:
+        _current_fudo_client.reset(token_fudo)
+        _current_cliente_info.reset(token_info)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -773,7 +815,7 @@ def health():
     sb_status = "conectado" if get_supabase() else "no configurado"
     return jsonify({
         "status": "ok",
-        "fudo": "habilitado" if _FUDO_ENABLED else "no configurado",
+        "fudo_global_fallback": "habilitado" if _FUDO_GLOBAL_ENABLED else "no configurado",
         "supabase": sb_status
     })
 
@@ -788,6 +830,43 @@ def message():
         return jsonify({"error": "El mensaje no puede estar vacío"}), 400
     reply = ask_claude(user_message, "local")
     return jsonify({"reply": reply})
+
+
+@app.route("/clientes", methods=["POST"])
+def crear_o_actualizar_cliente():
+    """Endpoint para dar de alta / actualizar un restaurante con sus credenciales Fudo.
+    Body esperado: { nombre_restaurante, pais, whatsapp_number_user, fudo_key, fudo_secret }"""
+    sb = get_supabase()
+    if not sb:
+        return jsonify({"error": "Supabase no configurado"}), 500
+
+    data = request.get_json(silent=True) or {}
+    whatsapp_number = data.get("whatsapp_number_user")
+    if not whatsapp_number:
+        return jsonify({"error": "whatsapp_number_user es requerido"}), 400
+
+    payload = {
+        "nombre_restaurante": data.get("nombre_restaurante", f"Cliente {whatsapp_number}"),
+        "pais": data.get("pais", "Chile"),
+        "whatsapp_phone_id": data.get("whatsapp_phone_id", os.environ.get("WHATSAPP_PHONE_ID", "")),
+        "whatsapp_number_user": whatsapp_number,
+        "fudo_key": data.get("fudo_key"),
+        "fudo_secret": data.get("fudo_secret"),
+        "activo": True,
+    }
+
+    try:
+        existing = sb.table("clientes").select("id").eq("whatsapp_number_user", whatsapp_number).execute()
+        if existing.data:
+            cliente_id = existing.data[0]["id"]
+            sb.table("clientes").update(payload).eq("id", cliente_id).execute()
+            return jsonify({"status": "actualizado", "cliente_id": cliente_id})
+        else:
+            nuevo = sb.table("clientes").insert(payload).execute()
+            return jsonify({"status": "creado", "cliente_id": nuevo.data[0]["id"] if nuevo.data else None})
+    except Exception as exc:
+        logging.error("Error crear_o_actualizar_cliente | %s", exc)
+        return jsonify({"error": str(exc)}), 500
 
 
 @app.route("/reset", methods=["POST"])
