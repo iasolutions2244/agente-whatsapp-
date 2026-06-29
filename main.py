@@ -19,7 +19,7 @@ logging.basicConfig(
 
 load_dotenv()
 
-for _var in ["ANTHROPIC_API_KEY", "WHATSAPP_TOKEN", "WHATSAPP_PHONE_ID", "WHATSAPP_VERIFY_TOKEN", "SUPABASE_URL", "SUPABASE_KEY"]:
+for _var in ["ANTHROPIC_API_KEY", "WHATSAPP_TOKEN", "WHATSAPP_PHONE_ID", "WHATSAPP_VERIFY_TOKEN", "SUPABASE_URL", "SUPABASE_SERVICE_KEY"]:
     logging.info("ENV CHECK | %s = %s", _var, "SET" if os.environ.get(_var) else "*** MISSING ***")
 
 # Fudo "global" queda solo como fallback para el cliente demo / pruebas locales
@@ -51,7 +51,7 @@ def get_supabase() -> Client | None:
     if _supabase:
         return _supabase
     url = os.environ.get("SUPABASE_URL")
-    key = os.environ.get("SUPABASE_KEY")
+    key = os.environ.get("SUPABASE_SERVICE_KEY")
     if url and key:
         _supabase = create_client(url, key)
         logging.info("Supabase conectado")
