@@ -66,14 +66,31 @@ def get_supabase() -> Client | None:
 
 def get_cliente_completo(phone_number: str) -> dict | None:
     """Busca el cliente por número de WhatsApp con TODOS sus datos (incluye credenciales Fudo).
-    Si no existe, lo crea sin credenciales (quedará pendiente de configurar)."""
+    Primero busca en clientes_usuarios (soporte multi-usuario por restaurante).
+    Si el número está activo=false se trata como no registrado.
+    Si no existe en clientes_usuarios, crea un cliente demo (comportamiento legado)."""
     sb = get_supabase()
     if not sb:
         return None
     try:
-        result = sb.table("clientes").select("*").eq("whatsapp_number_user", phone_number).execute()
+        # Buscar en clientes_usuarios → JOIN a clientes para traer credenciales Fudo
+        result = sb.table("clientes_usuarios") \
+            .select("activo, clientes(*)") \
+            .eq("whatsapp_number", phone_number) \
+            .limit(1) \
+            .execute()
+
         if result.data:
-            return result.data[0]
+            registro = result.data[0]
+            if not registro.get("activo", True):
+                # Usuario desactivado explícitamente → tratar como no registrado
+                logging.info("Usuario desactivado | phone=%s", phone_number)
+                return None
+            cliente = registro.get("clientes")
+            if cliente:
+                return cliente
+
+        # Fallback legado: crear cliente demo (números no registrados)
         nuevo = sb.table("clientes").insert({
             "nombre_restaurante": f"Cliente {phone_number}",
             "pais": "Chile",
@@ -83,7 +100,18 @@ def get_cliente_completo(phone_number: str) -> dict | None:
         }).execute()
         if nuevo.data:
             cliente = nuevo.data[0]
-            logging.info("Nuevo cliente creado | id=%s | phone=%s", cliente["id"], phone_number)
+            logging.info("Nuevo cliente demo creado | id=%s | phone=%s", cliente["id"], phone_number)
+            # Registrar también en clientes_usuarios para consistencia futura
+            try:
+                sb.table("clientes_usuarios").insert({
+                    "cliente_id": cliente["id"],
+                    "whatsapp_number": phone_number,
+                    "nombre": f"Cliente {phone_number}",
+                    "rol": "operador",
+                    "activo": True,
+                }).execute()
+            except Exception:
+                pass  # UNIQUE violation si ya existe; no bloquear el flujo
             return cliente
     except Exception as exc:
         logging.error("Error get_cliente_completo | %s", exc)
