@@ -19,7 +19,7 @@ logging.basicConfig(
 
 load_dotenv()
 
-for _var in ["ANTHROPIC_API_KEY", "WHATSAPP_TOKEN", "WHATSAPP_PHONE_ID", "WHATSAPP_VERIFY_TOKEN", "SUPABASE_URL", "SUPABASE_SERVICE_KEY"]:
+for _var in ["ANTHROPIC_API_KEY", "WHATSAPP_TOKEN", "WHATSAPP_PHONE_ID", "WHATSAPP_VERIFY_TOKEN", "SUPABASE_URL", "SUPABASE_SERVICE_KEY", "ADMIN_API_KEY"]:
     logging.info("ENV CHECK | %s = %s", _var, "SET" if os.environ.get(_var) else "*** MISSING ***")
 
 # Fudo "global" queda solo como fallback para el cliente demo / pruebas locales
@@ -864,6 +864,10 @@ def message():
 def crear_o_actualizar_cliente():
     """Endpoint para dar de alta / actualizar un restaurante con sus credenciales Fudo.
     Body esperado: { nombre_restaurante, pais, whatsapp_number_user, fudo_key, fudo_secret }"""
+    admin_key = os.environ.get("ADMIN_API_KEY")
+    if not admin_key or request.headers.get("X-Admin-Key") != admin_key:
+        return jsonify({"error": "No autorizado"}), 401
+
     sb = get_supabase()
     if not sb:
         return jsonify({"error": "Supabase no configurado"}), 500
