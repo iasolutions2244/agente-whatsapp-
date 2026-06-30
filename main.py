@@ -64,33 +64,66 @@ def get_supabase() -> Client | None:
 # Funciones de memoria + credenciales por cliente (Supabase)
 # ──────────────────────────────────────────────────────────────
 
+def _match_restaurante(mensaje: str, todos_accesos: list[dict]) -> dict | None:
+    """Matching conservador: el nombre completo del restaurante debe aparecer literalmente
+    en el mensaje. Nombres de 3 caracteres o menos se descartan. Si hay 0 o más de 1
+    coincidencia (ambigüedad) devuelve None para que Claude pida aclaración."""
+    mensaje_lower = mensaje.lower()
+    matches = []
+    for cliente in todos_accesos:
+        nombre = (cliente.get("nombre_restaurante") or "").strip()
+        if len(nombre) <= 3:
+            continue
+        if nombre.lower() in mensaje_lower:
+            matches.append(cliente)
+    return matches[0] if len(matches) == 1 else None
+
+
 def get_cliente_completo(phone_number: str) -> dict | None:
-    """Busca el cliente por número de WhatsApp con TODOS sus datos (incluye credenciales Fudo).
-    Primero busca en clientes_usuarios (soporte multi-usuario por restaurante).
-    Si el número está activo=false se trata como no registrado.
-    Si no existe en clientes_usuarios, crea un cliente demo (comportamiento legado)."""
+    """Busca el usuario por whatsapp_number en la tabla usuarios, luego trae todos sus
+    accesos activos con datos de clientes (credenciales Fudo).
+    - 1 acceso activo → devuelve el dict del cliente (igual que antes).
+    - N accesos activos → devuelve el primero como default + _todos_accesos + _usuario_nombre.
+    - Sin accesos activos → None.
+    Si el número no existe en usuarios, crea un cliente demo (comportamiento legado).
+    clientes_usuarios se mantiene sin tocar como respaldo."""
     sb = get_supabase()
     if not sb:
         return None
     try:
-        # Buscar en clientes_usuarios → JOIN a clientes para traer credenciales Fudo
-        result = sb.table("clientes_usuarios") \
-            .select("activo, clientes(*)") \
+        res_usuario = sb.table("usuarios") \
+            .select("id, nombre") \
             .eq("whatsapp_number", phone_number) \
             .limit(1) \
             .execute()
 
-        if result.data:
-            registro = result.data[0]
-            if not registro.get("activo", True):
-                # Usuario desactivado explícitamente → tratar como no registrado
-                logging.info("Usuario desactivado | phone=%s", phone_number)
-                return None
-            cliente = registro.get("clientes")
-            if cliente:
-                return cliente
+        if res_usuario.data:
+            usuario = res_usuario.data[0]
+            usuario_id = usuario["id"]
+            usuario_nombre = usuario.get("nombre") or ""
 
-        # Fallback legado: crear cliente demo (números no registrados)
+            res_accesos = sb.table("accesos") \
+                .select("rol, clientes(*)") \
+                .eq("usuario_id", usuario_id) \
+                .eq("activo", True) \
+                .order("created_at") \
+                .execute()
+
+            clientes_list = [
+                a["clientes"] for a in (res_accesos.data or []) if a.get("clientes")
+            ]
+
+            if not clientes_list:
+                logging.info("Sin accesos activos | phone=%s", phone_number)
+                return None
+
+            cliente = dict(clientes_list[0])
+            cliente["_usuario_nombre"] = usuario_nombre
+            if len(clientes_list) > 1:
+                cliente["_todos_accesos"] = clientes_list
+            return cliente
+
+        # Fallback: crear cliente demo para números no registrados
         nuevo = sb.table("clientes").insert({
             "nombre_restaurante": f"Cliente {phone_number}",
             "pais": "Chile",
@@ -100,18 +133,29 @@ def get_cliente_completo(phone_number: str) -> dict | None:
         }).execute()
         if nuevo.data:
             cliente = nuevo.data[0]
-            logging.info("Nuevo cliente demo creado | id=%s | phone=%s", cliente["id"], phone_number)
-            # Registrar también en clientes_usuarios para consistencia futura
+            cliente_id = cliente["id"]
+            logging.info("Nuevo cliente demo creado | id=%s | phone=%s", cliente_id, phone_number)
             try:
+                res_u = sb.table("usuarios").insert({
+                    "whatsapp_number": phone_number,
+                    "nombre": f"Cliente {phone_number}",
+                }).execute()
+                if res_u.data:
+                    sb.table("accesos").insert({
+                        "usuario_id": res_u.data[0]["id"],
+                        "cliente_id": cliente_id,
+                        "rol": "operador",
+                        "activo": True,
+                    }).execute()
                 sb.table("clientes_usuarios").insert({
-                    "cliente_id": cliente["id"],
+                    "cliente_id": cliente_id,
                     "whatsapp_number": phone_number,
                     "nombre": f"Cliente {phone_number}",
                     "rol": "operador",
                     "activo": True,
                 }).execute()
             except Exception:
-                pass  # UNIQUE violation si ya existe; no bloquear el flujo
+                pass
             return cliente
     except Exception as exc:
         logging.error("Error get_cliente_completo | %s", exc)
@@ -640,10 +684,11 @@ FUDO_TOOLS = [
 # System prompt
 # ──────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """Eres el asistente de negocio del dueño, disponible por WhatsApp.
+SYSTEM_PROMPT = """Eres el asistente de negocio de {nombre_pila}, disponible por WhatsApp.
+Saluda usando su nombre ("{nombre_pila}") de forma natural, especialmente al inicio de la conversación (ej: "Hola {nombre_pila}, ¿en qué te ayudo?"). Si el nombre es genérico como "dueño", omite el nombre en el saludo.
 Tienes acceso en tiempo real a los datos de Fudo (sistema de gestión del local de {nombre_restaurante}).
 La fecha de hoy es {today}.
-
+{multi_restaurante_ctx}
 Cuando el dueño pregunta sobre su negocio, usas las herramientas de Fudo para consultar datos reales y responder con información precisa.
 Nunca inventas datos: si no tienes la información o la API falla, lo dices claramente.
 
@@ -703,16 +748,26 @@ def _execute_tool(name: str, tool_input: dict) -> Any:
 
 
 def ask_claude(user_message: str, phone_number: str) -> str:
-    # ── Identificar cliente y SUS credenciales Fudo ──
+    # ── Identificar usuario y seleccionar restaurante activo ──
     cliente_info = get_cliente_completo(phone_number)
     cliente_id = cliente_info.get("id") if cliente_info else None
     conversacion_id = get_or_create_conversacion(cliente_id) if cliente_id else None
 
-    # Activar el contexto: a partir de aquí, todas las funciones get_* de Fudo
-    # usarán automáticamente las credenciales de ESTE restaurante.
-    fudo_client = get_fudo_client_for(cliente_info)
+    todos_accesos = (cliente_info or {}).get("_todos_accesos", [])
+    usuario_nombre_raw = (cliente_info or {}).get("_usuario_nombre", "")
+    nombre_pila = usuario_nombre_raw.split()[0].capitalize() if usuario_nombre_raw.strip() else "dueño"
+
+    # Seleccionar restaurante para esta consulta (conservador: nombre completo literal en el mensaje)
+    cliente_activo = cliente_info
+    if todos_accesos:
+        match = _match_restaurante(user_message, todos_accesos)
+        if match:
+            cliente_activo = match
+            logging.info("Restaurante seleccionado por match | nombre=%s", match.get("nombre_restaurante"))
+
+    fudo_client = get_fudo_client_for(cliente_activo)
     token_fudo = _current_fudo_client.set(fudo_client)
-    token_info = _current_cliente_info.set(cliente_info)
+    token_info = _current_cliente_info.set(cliente_activo)
 
     try:
         if cliente_id:
@@ -724,8 +779,28 @@ def ask_claude(user_message: str, phone_number: str) -> str:
         guardar_mensaje(conversacion_id, "user", user_message)
         history.append({"role": "user", "content": user_message})
 
-        nombre_restaurante = (cliente_info or {}).get("nombre_restaurante", "tu negocio")
-        system = SYSTEM_PROMPT.format(today=datetime.now().strftime("%Y-%m-%d"), nombre_restaurante=nombre_restaurante)
+        nombre_restaurante = (cliente_activo or {}).get("nombre_restaurante", "tu negocio")
+
+        if todos_accesos:
+            nombres = [a.get("nombre_restaurante", "") for a in todos_accesos]
+            otros = [n for n in nombres if n != nombre_restaurante]
+            nombres_pregunta = " o ".join(f'"{n}"' for n in nombres)
+            multi_ctx = (
+                f'ACCESO MULTI-RESTAURANTE: Este usuario tiene acceso a: {", ".join(nombres)}. '
+                f'Estás respondiendo con datos de "{nombre_restaurante}". '
+                f'Si la pregunta no especifica a cuál restaurante se refiere, usa "{nombre_restaurante}" como predeterminado '
+                f'e informa que también puede consultar {", ".join(otros)}. '
+                f'Si hay ambigüedad, pregunta explícitamente "¿te refieres a {nombres_pregunta}?" antes de consultar datos.\n'
+            )
+        else:
+            multi_ctx = ""
+
+        system = SYSTEM_PROMPT.format(
+            today=datetime.now().strftime("%Y-%m-%d"),
+            nombre_restaurante=nombre_restaurante,
+            nombre_pila=nombre_pila,
+            multi_restaurante_ctx=multi_ctx,
+        )
         active_tools = FUDO_TOOLS if fudo_client else []
         final_response = ""
 
