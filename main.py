@@ -750,8 +750,6 @@ def _execute_tool(name: str, tool_input: dict) -> Any:
 def ask_claude(user_message: str, phone_number: str) -> str:
     # ── Identificar usuario y seleccionar restaurante activo ──
     cliente_info = get_cliente_completo(phone_number)
-    cliente_id = cliente_info.get("id") if cliente_info else None
-    conversacion_id = get_or_create_conversacion(cliente_id) if cliente_id else None
 
     todos_accesos = (cliente_info or {}).get("_todos_accesos", [])
     usuario_nombre_raw = (cliente_info or {}).get("_usuario_nombre", "")
@@ -764,6 +762,10 @@ def ask_claude(user_message: str, phone_number: str) -> str:
         if match:
             cliente_activo = match
             logging.info("Restaurante seleccionado por match | nombre=%s", match.get("nombre_restaurante"))
+
+    # cliente_id y conversacion_id se derivan de cliente_activo (post-match)
+    cliente_id = cliente_activo.get("id") if cliente_activo else None
+    conversacion_id = get_or_create_conversacion(cliente_id) if cliente_id else None
 
     fudo_client = get_fudo_client_for(cliente_activo)
     token_fudo = _current_fudo_client.set(fudo_client)
