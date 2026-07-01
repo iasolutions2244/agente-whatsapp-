@@ -396,7 +396,7 @@ def get_waste_report() -> dict:
     return _fudo_get("/ingredients", "page[size]=100&sort=name&include=ingredientCategory,unit&filter[stockControl]=eq.true")
 
 def get_deliveries_report(from_date: str, to_date: str) -> dict:
-    return _fudo_get("/sales", f"filter[createdAt]={_date_filter(from_date, to_date)}&filter[saleType]=DELIVERY&page[size]=100&include=items")
+    return _fudo_get("/sales", f"filter[createdAt]={_date_filter(from_date, to_date)}&filter[saleType]=eq.DELIVERY&page[size]=100&include=items")
 
 def get_orders(from_date: str, to_date: str, status: str = "all") -> dict:
     query = f"filter[createdAt]={_date_filter(from_date, to_date)}&page[size]=100&include=items.product,payments.paymentMethod"
@@ -429,7 +429,7 @@ def get_categories_sales() -> dict:
 def get_products(name: str | None = None, active: bool = True, stock_control: bool | None = None) -> dict:
     query = "filter[active]=eq.true&page[size]=100&sort=name&include=productCategory"
     if name:
-        query += f"&filter[name]={name}"
+        query += f"&filter[name]=eq.{name}"
     if stock_control:
         query += "&filter[stockControl]=eq.true"
     return _fudo_get("/products", query)
@@ -439,7 +439,7 @@ def get_ingredients(name: str | None = None, stock_control: bool | None = None) 
     if stock_control:
         query += "&filter[stockControl]=eq.true"
     if name:
-        query += f"&filter[name]={name}"
+        query += f"&filter[name]=eq.{name}"
     return _fudo_get("/ingredients", query)
 
 def get_stock_status() -> dict:
@@ -452,7 +452,7 @@ def get_expenses(from_date: str, to_date: str, category_id: str | None = None) -
     query = (f"filter[createdAt]=and(gte.{from_date}T00:00:00Z,lte.{to_date}T23:59:59Z)"
              "&page[size]=100&sort=-date&include=expenseCategory,provider,payments.paymentMethod")
     if category_id:
-        query += f"&filter[expenseCategoryId]={category_id}"
+        query += f"&filter[expenseCategoryId]=eq.{category_id}"
     return _fudo_get("/expenses", query)
 
 def get_expense_categories() -> dict:
@@ -460,7 +460,7 @@ def get_expense_categories() -> dict:
 
 def get_payments(from_date: str, to_date: str, canceled: bool = False) -> dict:
     query = (f"filter[createdAt]=and(gte.{from_date}T00:00:00Z,lte.{to_date}T23:59:59Z)"
-             "&filter[canceled]=false&page[size]=100&sort=-id&include=paymentMethod")
+             "&filter[canceled]=eq.false&page[size]=100&sort=-id&include=paymentMethod")
     return _fudo_get("/payments", query)
 
 def get_payment_methods() -> dict:
