@@ -79,14 +79,39 @@ def _match_restaurante(mensaje: str, todos_accesos: list[dict]) -> dict | None:
     return matches[0] if len(matches) == 1 else None
 
 
+MENSAJE_NO_REGISTRADO = (
+    "¡Hola! 👋 Soy el asistente de Digitaly Pro. Este servicio está disponible "
+    "exclusivamente para nuestros clientes suscritos. Si tienes un restaurante y "
+    "te gustaría consultar tus ventas, inventario y más directamente desde WhatsApp, "
+    "escríbenos a contacto@digitalypro.com o visita digitalypro.com para más información."
+)
+
+
+def is_usuario_registrado(phone_number: str) -> bool:
+    """Verifica si el número existe en la tabla usuarios, sin crear nada."""
+    sb = get_supabase()
+    if not sb:
+        return False
+    try:
+        res = sb.table("usuarios") \
+            .select("id") \
+            .eq("whatsapp_number", phone_number) \
+            .limit(1) \
+            .execute()
+        return bool(res.data)
+    except Exception as exc:
+        logging.error("Error is_usuario_registrado | %s", exc)
+        return False
+
+
 def get_cliente_completo(phone_number: str) -> dict | None:
     """Busca el usuario por whatsapp_number en la tabla usuarios, luego trae todos sus
     accesos activos con datos de clientes (credenciales Fudo).
     - 1 acceso activo → devuelve el dict del cliente (igual que antes).
     - N accesos activos → devuelve el primero como default + _todos_accesos + _usuario_nombre.
     - Sin accesos activos → None.
-    Si el número no existe en usuarios, crea un cliente demo (comportamiento legado).
-    clientes_usuarios se mantiene sin tocar como respaldo."""
+    Si el número no existe en usuarios, devuelve None (ya no se auto-crea nada;
+    is_usuario_registrado() filtra estos casos antes de llegar aquí)."""
     sb = get_supabase()
     if not sb:
         return None
@@ -97,66 +122,34 @@ def get_cliente_completo(phone_number: str) -> dict | None:
             .limit(1) \
             .execute()
 
-        if res_usuario.data:
-            usuario = res_usuario.data[0]
-            usuario_id = usuario["id"]
-            usuario_nombre = usuario.get("nombre") or ""
+        if not res_usuario.data:
+            logging.info("Usuario no encontrado | phone=%s", phone_number)
+            return None
 
-            res_accesos = sb.table("accesos") \
-                .select("rol, clientes(*)") \
-                .eq("usuario_id", usuario_id) \
-                .eq("activo", True) \
-                .order("created_at") \
-                .execute()
+        usuario = res_usuario.data[0]
+        usuario_id = usuario["id"]
+        usuario_nombre = usuario.get("nombre") or ""
 
-            clientes_list = [
-                a["clientes"] for a in (res_accesos.data or []) if a.get("clientes")
-            ]
+        res_accesos = sb.table("accesos") \
+            .select("rol, clientes(*)") \
+            .eq("usuario_id", usuario_id) \
+            .eq("activo", True) \
+            .order("created_at") \
+            .execute()
 
-            if not clientes_list:
-                logging.info("Sin accesos activos | phone=%s", phone_number)
-                return None
+        clientes_list = [
+            a["clientes"] for a in (res_accesos.data or []) if a.get("clientes")
+        ]
 
-            cliente = dict(clientes_list[0])
-            cliente["_usuario_nombre"] = usuario_nombre
-            if len(clientes_list) > 1:
-                cliente["_todos_accesos"] = clientes_list
-            return cliente
+        if not clientes_list:
+            logging.info("Sin accesos activos | phone=%s", phone_number)
+            return None
 
-        # Fallback: crear cliente demo para números no registrados
-        nuevo = sb.table("clientes").insert({
-            "nombre_restaurante": f"Cliente {phone_number}",
-            "pais": "Chile",
-            "whatsapp_phone_id": os.environ.get("WHATSAPP_PHONE_ID", ""),
-            "whatsapp_number_user": phone_number,
-            "activo": True
-        }).execute()
-        if nuevo.data:
-            cliente = nuevo.data[0]
-            cliente_id = cliente["id"]
-            logging.info("Nuevo cliente demo creado | id=%s | phone=%s", cliente_id, phone_number)
-            try:
-                res_u = sb.table("usuarios").insert({
-                    "whatsapp_number": phone_number,
-                    "nombre": f"Cliente {phone_number}",
-                }).execute()
-                if res_u.data:
-                    sb.table("accesos").insert({
-                        "usuario_id": res_u.data[0]["id"],
-                        "cliente_id": cliente_id,
-                        "rol": "operador",
-                        "activo": True,
-                    }).execute()
-                sb.table("clientes_usuarios").insert({
-                    "cliente_id": cliente_id,
-                    "whatsapp_number": phone_number,
-                    "nombre": f"Cliente {phone_number}",
-                    "rol": "operador",
-                    "activo": True,
-                }).execute()
-            except Exception:
-                pass
-            return cliente
+        cliente = dict(clientes_list[0])
+        cliente["_usuario_nombre"] = usuario_nombre
+        if len(clientes_list) > 1:
+            cliente["_todos_accesos"] = clientes_list
+        return cliente
     except Exception as exc:
         logging.error("Error get_cliente_completo | %s", exc)
     return None
@@ -908,6 +901,12 @@ def webhook_receive():
                 sender = msg["from"]
                 text = msg["text"]["body"]
                 logging.info("Mensaje de %s: %s", sender, text)
+
+                if not is_usuario_registrado(sender):
+                    logging.info("Número no registrado, respuesta fija sin pasar por Claude | phone=%s", sender)
+                    send_whatsapp_message(sender, MENSAJE_NO_REGISTRADO)
+                    continue
+
                 reply = ask_claude(text, sender)
                 logging.info("Respuesta para %s: %s", sender, reply[:100])
                 send_whatsapp_message(sender, reply)
