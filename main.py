@@ -19,6 +19,8 @@ logging.basicConfig(
 
 load_dotenv()
 
+from crypto_utils import encrypt_value, decrypt_value  # noqa: E402 (requiere ENCRYPTION_KEY, cargada arriba con load_dotenv)
+
 for _var in ["ANTHROPIC_API_KEY", "WHATSAPP_TOKEN", "WHATSAPP_PHONE_ID", "WHATSAPP_VERIFY_TOKEN", "SUPABASE_URL", "SUPABASE_SERVICE_KEY", "ADMIN_API_KEY"]:
     logging.info("ENV CHECK | %s = %s", _var, "SET" if os.environ.get(_var) else "*** MISSING ***")
 
@@ -341,6 +343,20 @@ def get_fudo_client_for(cliente_info: dict | None) -> FudoClient | None:
 
     fudo_key = cliente_info.get("fudo_key")
     fudo_secret = cliente_info.get("fudo_secret")
+
+    # Las credenciales vienen cifradas desde Supabase (ver crypto_utils.py) -> descifrar
+    # antes de usarlas. Si no descifran (p.ej. texto plano sin migrar todavía), se
+    # tratan como ausentes para no romper la request; ver script de migración.
+    try:
+        fudo_key = decrypt_value(fudo_key)
+        fudo_secret = decrypt_value(fudo_secret)
+    except ValueError as exc:
+        logging.error(
+            "No se pudieron descifrar credenciales Fudo | cliente_id=%s | %s",
+            cliente_info.get("id"), exc,
+        )
+        fudo_key = None
+        fudo_secret = None
 
     # Fallback: si el cliente no tiene credenciales propias, usar las globales de Railway
     # (útil para el restaurante demo / pruebas, antes de tener credenciales reales por cliente)
@@ -960,8 +976,8 @@ def crear_o_actualizar_cliente():
         "pais": data.get("pais", "Chile"),
         "whatsapp_phone_id": data.get("whatsapp_phone_id", os.environ.get("WHATSAPP_PHONE_ID", "")),
         "whatsapp_number_user": whatsapp_number,
-        "fudo_key": data.get("fudo_key"),
-        "fudo_secret": data.get("fudo_secret"),
+        "fudo_key": encrypt_value(data.get("fudo_key")),
+        "fudo_secret": encrypt_value(data.get("fudo_secret")),
         "activo": True,
     }
 
