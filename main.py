@@ -196,6 +196,70 @@ def actualizar_restaurante_activo(usuario_id: str | None, cliente_id: str | None
         logging.error("Error actualizar_restaurante_activo | %s", exc)
 
 
+def guardar_pregunta_pendiente(usuario_id: str | None, mensaje: str) -> None:
+    """Guarda el mensaje original del usuario cuando el bot corta para preguntar cuál
+    restaurante (ambigüedad), para poder reusarlo apenas responda (ver
+    consumir_pregunta_pendiente)."""
+    sb = get_supabase()
+    if not sb or not usuario_id:
+        return
+    try:
+        sb.table("usuarios").update({
+            "pregunta_pendiente": mensaje,
+            "pregunta_pendiente_ts": datetime.utcnow().isoformat(),
+        }).eq("id", usuario_id).execute()
+    except Exception as exc:
+        logging.error("Error guardar_pregunta_pendiente | %s", exc)
+
+
+def consumir_pregunta_pendiente(usuario_id: str | None, nombre_restaurante: str, mensaje_actual: str) -> str:
+    """Si hay una pregunta_pendiente vigente (menos de 10 minutos) para este usuario,
+    decide si el mensaje actual es solo la confirmación del restaurante (≤3 palabras
+    tras sacarle el nombre matcheado -> usa la pregunta pendiente) o una pregunta nueva
+    con contenido propio (usa el mensaje tal cual). En ambos casos limpia
+    pregunta_pendiente/ts: se consume una sola vez. Si no hay pendiente vigente,
+    devuelve mensaje_actual sin tocar nada."""
+    sb = get_supabase()
+    if not sb or not usuario_id:
+        return mensaje_actual
+    try:
+        res = sb.table("usuarios") \
+            .select("pregunta_pendiente, pregunta_pendiente_ts") \
+            .eq("id", usuario_id) \
+            .limit(1) \
+            .execute()
+        if not res.data:
+            return mensaje_actual
+
+        pendiente = res.data[0].get("pregunta_pendiente")
+        ts_raw = res.data[0].get("pregunta_pendiente_ts")
+        if not pendiente or not ts_raw:
+            return mensaje_actual
+        try:
+            ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00")).replace(tzinfo=None)
+        except (ValueError, TypeError):
+            return mensaje_actual
+        if datetime.utcnow() - ts >= timedelta(minutes=10):
+            return mensaje_actual
+
+        # Pendiente vigente encontrada -> se consume una sola vez, limpiar ya
+        sb.table("usuarios").update({
+            "pregunta_pendiente": None,
+            "pregunta_pendiente_ts": None,
+        }).eq("id", usuario_id).execute()
+
+        resto = mensaje_actual.lower().replace((nombre_restaurante or "").lower(), "").strip()
+        if len(resto.split()) <= 3:
+            logging.info("Pregunta pendiente reusada | usuario=%s", usuario_id)
+            return pendiente
+
+        logging.info("Pregunta pendiente descartada (mensaje nuevo con contenido) | usuario=%s", usuario_id)
+        return mensaje_actual
+    except Exception as exc:
+        logging.error("Error consumir_pregunta_pendiente | %s", exc)
+        return mensaje_actual
+
+
 def get_or_create_conversacion(cliente_id: str, usuario_id: str | None = None) -> str | None:
     """Obtiene la conversación activa del cliente+usuario o crea una nueva.
     usuario_id distingue conversaciones entre distintas personas con acceso al
@@ -815,6 +879,7 @@ def ask_claude(user_message: str, phone_number: str) -> str:
         if match:
             cliente_activo = match
             actualizar_restaurante_activo(usuario_id, match.get("id"))
+            user_message = consumir_pregunta_pendiente(usuario_id, match.get("nombre_restaurante", ""), user_message)
             logging.info("Restaurante seleccionado por match | nombre=%s", match.get("nombre_restaurante"))
         else:
             vigente = _restaurante_activo_vigente(cliente_info, todos_accesos)
@@ -825,6 +890,7 @@ def ask_claude(user_message: str, phone_number: str) -> str:
                 nombres = [a.get("nombre_restaurante", "") for a in todos_accesos]
                 nombres_txt = " o ".join(f'"{n}"' for n in nombres)
                 logging.info("Restaurante ambiguo sin activo vigente | usuario=%s", usuario_id)
+                guardar_pregunta_pendiente(usuario_id, user_message)
                 return MENSAJE_ELEGIR_RESTAURANTE.format(nombres=nombres_txt)
 
     # cliente_id y conversacion_id se derivan de cliente_activo (post-match)
