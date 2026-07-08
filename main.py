@@ -81,11 +81,32 @@ def _match_restaurante(mensaje: str, todos_accesos: list[dict]) -> dict | None:
     return matches[0] if len(matches) == 1 else None
 
 
+def _restaurante_activo_vigente(cliente_info: dict, todos_accesos: list[dict]) -> dict | None:
+    """Si el usuario tiene un restaurante_activo_id/ts guardado y de menos de 2 horas,
+    devuelve el acceso correspondiente. Si no hay elección previa, expiró, o el acceso
+    ya no está entre los activos del usuario, devuelve None."""
+    rid = cliente_info.get("_restaurante_activo_id")
+    ts_raw = cliente_info.get("_restaurante_activo_ts")
+    if not rid or not ts_raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00")).replace(tzinfo=None)
+    except (ValueError, TypeError):
+        return None
+    if datetime.utcnow() - ts >= timedelta(hours=2):
+        return None
+    return next((a for a in todos_accesos if a.get("id") == rid), None)
+
+
 MENSAJE_NO_REGISTRADO = (
     "¡Hola! 👋 Soy el asistente de Digitaly Pro. Este servicio está disponible "
     "exclusivamente para nuestros clientes suscritos. Si tienes un restaurante y "
     "te gustaría consultar tus ventas, inventario y más directamente desde WhatsApp, "
     "escríbenos a contacto@digitalypro.com o visita digitalypro.com para más información."
+)
+
+MENSAJE_ELEGIR_RESTAURANTE = (
+    "Tienes acceso a varios restaurantes: {nombres}. ¿Cuál quieres consultar?"
 )
 
 
@@ -119,7 +140,7 @@ def get_cliente_completo(phone_number: str) -> dict | None:
         return None
     try:
         res_usuario = sb.table("usuarios") \
-            .select("id, nombre") \
+            .select("id, nombre, restaurante_activo_id, restaurante_activo_ts") \
             .eq("whatsapp_number", phone_number) \
             .limit(1) \
             .execute()
@@ -150,12 +171,29 @@ def get_cliente_completo(phone_number: str) -> dict | None:
         cliente = dict(clientes_list[0])
         cliente["_usuario_nombre"] = usuario_nombre
         cliente["_usuario_id"] = usuario_id
+        cliente["_restaurante_activo_id"] = usuario.get("restaurante_activo_id")
+        cliente["_restaurante_activo_ts"] = usuario.get("restaurante_activo_ts")
         if len(clientes_list) > 1:
             cliente["_todos_accesos"] = clientes_list
         return cliente
     except Exception as exc:
         logging.error("Error get_cliente_completo | %s", exc)
     return None
+
+
+def actualizar_restaurante_activo(usuario_id: str | None, cliente_id: str | None) -> None:
+    """Guarda cuál restaurante eligió (por match o respuesta explícita) este usuario,
+    para poder recordarlo en mensajes siguientes sin volver a preguntar."""
+    sb = get_supabase()
+    if not sb or not usuario_id or not cliente_id:
+        return
+    try:
+        sb.table("usuarios").update({
+            "restaurante_activo_id": cliente_id,
+            "restaurante_activo_ts": datetime.utcnow().isoformat(),
+        }).eq("id", usuario_id).execute()
+    except Exception as exc:
+        logging.error("Error actualizar_restaurante_activo | %s", exc)
 
 
 def get_or_create_conversacion(cliente_id: str, usuario_id: str | None = None) -> str | None:
@@ -776,7 +814,18 @@ def ask_claude(user_message: str, phone_number: str) -> str:
         match = _match_restaurante(user_message, todos_accesos)
         if match:
             cliente_activo = match
+            actualizar_restaurante_activo(usuario_id, match.get("id"))
             logging.info("Restaurante seleccionado por match | nombre=%s", match.get("nombre_restaurante"))
+        else:
+            vigente = _restaurante_activo_vigente(cliente_info, todos_accesos)
+            if vigente:
+                cliente_activo = vigente
+                logging.info("Restaurante activo recordado | nombre=%s", vigente.get("nombre_restaurante"))
+            else:
+                nombres = [a.get("nombre_restaurante", "") for a in todos_accesos]
+                nombres_txt = " o ".join(f'"{n}"' for n in nombres)
+                logging.info("Restaurante ambiguo sin activo vigente | usuario=%s", usuario_id)
+                return MENSAJE_ELEGIR_RESTAURANTE.format(nombres=nombres_txt)
 
     # cliente_id y conversacion_id se derivan de cliente_activo (post-match)
     cliente_id = cliente_activo.get("id") if cliente_activo else None
