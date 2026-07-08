@@ -149,6 +149,7 @@ def get_cliente_completo(phone_number: str) -> dict | None:
 
         cliente = dict(clientes_list[0])
         cliente["_usuario_nombre"] = usuario_nombre
+        cliente["_usuario_id"] = usuario_id
         if len(clientes_list) > 1:
             cliente["_todos_accesos"] = clientes_list
         return cliente
@@ -157,28 +158,32 @@ def get_cliente_completo(phone_number: str) -> dict | None:
     return None
 
 
-def get_or_create_conversacion(cliente_id: str) -> str | None:
-    """Obtiene la conversación activa del cliente o crea una nueva."""
+def get_or_create_conversacion(cliente_id: str, usuario_id: str | None = None) -> str | None:
+    """Obtiene la conversación activa del cliente+usuario o crea una nueva.
+    usuario_id distingue conversaciones entre distintas personas con acceso al
+    mismo restaurante (cliente_id solo no alcanza: ver conversaciones.usuario_id)."""
     sb = get_supabase()
     if not sb:
         return None
     try:
         desde = (datetime.utcnow() - timedelta(hours=2)).isoformat()
-        result = sb.table("conversaciones") \
+        query = sb.table("conversaciones") \
             .select("id") \
             .eq("cliente_id", cliente_id) \
             .is_("fecha_fin", "null") \
-            .gte("fecha_inicio", desde) \
-            .order("fecha_inicio", desc=True) \
-            .limit(1) \
-            .execute()
+            .gte("fecha_inicio", desde)
+        query = query.eq("usuario_id", usuario_id) if usuario_id else query.is_("usuario_id", "null")
+        result = query.order("fecha_inicio", desc=True).limit(1).execute()
         if result.data:
             return result.data[0]["id"]
-        nueva = sb.table("conversaciones").insert({
+        payload = {
             "cliente_id": cliente_id,
             "fecha_inicio": datetime.utcnow().isoformat(),
-            "pais": "Chile"
-        }).execute()
+            "pais": "Chile",
+        }
+        if usuario_id:
+            payload["usuario_id"] = usuario_id
+        nueva = sb.table("conversaciones").insert(payload).execute()
         if nueva.data:
             return nueva.data[0]["id"]
     except Exception as exc:
@@ -202,15 +207,16 @@ def guardar_mensaje(conversacion_id: str, rol: str, contenido: str, tokens: int 
         logging.error("Error guardar_mensaje | %s", exc)
 
 
-def cargar_historial(cliente_id: str, limite: int = 20) -> list[dict]:
+def cargar_historial(cliente_id: str, usuario_id: str | None = None, limite: int = 20) -> list[dict]:
     sb = get_supabase()
     if not sb:
         return []
     try:
-        convs = sb.table("conversaciones") \
+        query = sb.table("conversaciones") \
             .select("id") \
-            .eq("cliente_id", cliente_id) \
-            .order("fecha_inicio", desc=True) \
+            .eq("cliente_id", cliente_id)
+        query = query.eq("usuario_id", usuario_id) if usuario_id else query.is_("usuario_id", "null")
+        convs = query.order("fecha_inicio", desc=True) \
             .limit(3) \
             .execute()
         if not convs.data:
@@ -761,6 +767,7 @@ def ask_claude(user_message: str, phone_number: str) -> str:
 
     todos_accesos = (cliente_info or {}).get("_todos_accesos", [])
     usuario_nombre_raw = (cliente_info or {}).get("_usuario_nombre", "")
+    usuario_id = (cliente_info or {}).get("_usuario_id")
     nombre_pila = usuario_nombre_raw.split()[0].capitalize() if usuario_nombre_raw.strip() else "dueño"
 
     # Seleccionar restaurante para esta consulta (conservador: nombre completo literal en el mensaje)
@@ -773,7 +780,7 @@ def ask_claude(user_message: str, phone_number: str) -> str:
 
     # cliente_id y conversacion_id se derivan de cliente_activo (post-match)
     cliente_id = cliente_activo.get("id") if cliente_activo else None
-    conversacion_id = get_or_create_conversacion(cliente_id) if cliente_id else None
+    conversacion_id = get_or_create_conversacion(cliente_id, usuario_id) if cliente_id else None
 
     fudo_client = get_fudo_client_for(cliente_activo)
     token_fudo = _current_fudo_client.set(fudo_client)
@@ -781,7 +788,7 @@ def ask_claude(user_message: str, phone_number: str) -> str:
 
     try:
         if cliente_id:
-            history = cargar_historial(cliente_id)
+            history = cargar_historial(cliente_id, usuario_id)
             logging.info("Historial cargado | cliente=%s | mensajes=%d", cliente_id, len(history))
         else:
             history = conversation_histories.setdefault(phone_number, [])
